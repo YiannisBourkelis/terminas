@@ -30,39 +30,15 @@ reclaim_btrfs_space() {
         return 0
     fi
 
-    echo "Waiting for Btrfs to finish deleting $deleted_count subvolume(s) (timeout 60s)..."
-
-    # Count pending DELETED entries before waiting
-    local before_count
-    before_count=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
-
-    # Use a 60-second timeout to avoid hanging on ancient orphaned deletions
-    if command -v timeout >/dev/null 2>&1; then
-        if timeout 60s btrfs subvolume sync /home >/dev/null 2>&1; then
-            echo "✓ Btrfs reported deletions completed within 60s"
-        else
-            echo "⚠ Timeout or error while waiting for Btrfs deletions (60s)"
-        fi
+    # Non-blocking: commit deletion metadata and let the kernel cleaner work
+    echo "Committing Btrfs deletions (non-blocking)..."
+    if btrfs filesystem sync /home >/dev/null 2>&1; then
+        echo "✓ Deletion committed; space will be reclaimed asynchronously"
     else
-        # Fallback without timeout if coreutils 'timeout' is unavailable
-        if btrfs subvolume sync /home >/dev/null 2>&1; then
-            echo "✓ Btrfs deletions completed"
-        else
-            echo "⚠ Error while waiting for Btrfs deletions"
-        fi
+        echo "⚠ WARNING: 'btrfs filesystem sync /home' failed"
+        echo "  Deletions are still marked; the kernel cleaner will reclaim space."
+        echo "  Inspect pending deletions with: ./manage_users.sh show-pending-deletions"
     fi
-
-    # Show pending DELETED count after waiting
-    local after_count
-    after_count=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
-    echo "Pending deleted subvolumes: before=$before_count, after=$after_count"
-
-    if [ "$after_count" -gt 0 ]; then
-        echo "Some deletions are still pending; space will be reclaimed asynchronously."
-        echo "You can inspect details with: ./manage_users.sh show-pending-deletions"
-    fi
-
-    # Return success even on timeout to avoid failing the whole delete flow
     return 0
 }
 
@@ -208,6 +184,7 @@ if [ -d "/home/$USERNAME" ]; then
     
     # Reclaim Btrfs space from deleted subvolumes (uploads + snapshots)
     if [ $total_deleted -gt 0 ]; then
+        echo "  Total subvolumes deleted in this operation: $total_deleted (uploads + snapshots)"
         reclaim_btrfs_space $total_deleted
     fi
     
