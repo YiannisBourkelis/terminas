@@ -102,8 +102,28 @@ cleanup_test_user() {
     echo ""
 }
 
-# Parse command line arguments
-if [ "${1:-}" = "--cleanup-only" ]; then
+# Parse command line arguments (accept common aliases/typos)
+CLEANUP_ONLY=false
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --cleanup-only|--cleanup|--clean-up-only|--cleanuponly|--clenup-only)
+            CLEANUP_ONLY=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [--cleanup-only]"
+            echo "Aliases: --cleanup, --clean-up-only, --cleanuponly, --clenup-only"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            echo "Usage: $0 [--cleanup-only]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ "$CLEANUP_ONLY" = "true" ]; then
     cleanup_test_user
     exit 0
 fi
