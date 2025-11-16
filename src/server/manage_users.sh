@@ -175,7 +175,13 @@ show_pending_deletions() {
     local output
     output=$(btrfs subvolume list -d /home 2>/dev/null || true)
     local count
-    count=$(printf "%s\n" "$output" | grep -c "." || echo 0)
+    if [ -z "$output" ]; then
+        count=0
+    else
+        # Count lines robustly and strip spaces/newlines
+        count=$(printf "%s\n" "$output" | wc -l | tr -cd '0-9')
+        [ -z "$count" ] && count=0
+    fi
 
     echo "=========================================="
     echo "Pending deleted subvolumes: $count"
@@ -189,11 +195,13 @@ show_pending_deletions() {
 
     # Show up to 50 entries to avoid overwhelming the terminal
     local limit=50
-    if [ "$count" -le $limit ]; then
-        printf "%s\n" "$output"
+    if [ "$count" -le "$limit" ]; then
+        printf "%s\n" "$output"  
     else
-        printf "%s\n" "$output" | head -n $limit
-        echo "... ($((count - limit)) more not shown)"
+        printf "%s\n" "$output" | head -n "$limit"
+        # Safe arithmetic: both are integers here
+        local remaining=$((count - limit))
+        echo "... (${remaining} more not shown)"
     fi
 
     echo ""
