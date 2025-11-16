@@ -52,6 +52,8 @@ Commands:
     set-quota <username> <GB>  Set storage quota for user (0 = unlimited)
     remove-quota <username>    Remove storage quota (unlimited)
     show-quota <username>      Show quota usage and limit for user
+    show-pending-deletions  Show Btrfs pending deleted subvolumes under /home
+    force-clean             Restart monitor and commit Btrfs deletions (non-blocking)
     enable-samba <username> Enable Samba (SMB) sharing for an existing user
     disable-samba <username> Disable Samba (SMB) sharing for an existing user
     enable-samba-versions <username>  Enable read-only SMB access to versions (snapshots) directory
@@ -159,6 +161,83 @@ update_samba_includes() {
             fi
         done
     fi
+}
+
+# Show Btrfs pending deletions under /home
+show_pending_deletions() {
+    echo "Checking Btrfs pending deletions for /home..."
+    if ! command -v btrfs >/dev/null 2>&1; then
+        echo "ERROR: btrfs command not found. This server must run on Btrfs."
+        return 1
+    fi
+
+    # btrfs subvolume list -d lists subvolumes pending delete on this filesystem
+    local output
+    output=$(btrfs subvolume list -d /home 2>/dev/null || true)
+    local count
+    count=$(printf "%s\n" "$output" | grep -c "." || echo 0)
+
+    echo "=========================================="
+    echo "Pending deleted subvolumes: $count"
+    echo "Filesystem: /home"
+    echo "=========================================="
+
+    if [ "$count" -eq 0 ]; then
+        echo "No pending deletions. The cleaner has processed all deletions."
+        return 0
+    fi
+
+    # Show up to 50 entries to avoid overwhelming the terminal
+    local limit=50
+    if [ "$count" -le $limit ]; then
+        printf "%s\n" "$output"
+    else
+        printf "%s\n" "$output" | head -n $limit
+        echo "... ($((count - limit)) more not shown)"
+    fi
+
+    echo ""
+    echo "Tip: Space is reclaimed asynchronously by the Btrfs cleaner."
+    echo "     You can run: $SCRIPT_NAME force-clean to commit deletions."
+}
+
+# Force a non-blocking cleanup: restart monitor (to drop inotify descriptors)
+# and commit deletion metadata so the kernel cleaner can reclaim space
+force_clean() {
+    echo "Forcing non-blocking cleanup..."
+
+    # Restart monitor service if present
+    if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/terminas-monitor.service ]; then
+        if systemctl is-active --quiet terminas-monitor.service; then
+            echo "Restarting terminas-monitor.service..."
+            systemctl restart terminas-monitor.service || true
+        else
+            echo "terminas-monitor.service is not active; attempting to start..."
+            systemctl restart terminas-monitor.service || true
+        fi
+    else
+        echo "Monitor service not found; skipping service restart"
+    fi
+
+    # Show count before sync
+    local before
+    before=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
+    echo "Pending deletions before: $before"
+
+    # Commit metadata; do NOT use 'btrfs subvolume sync' here
+    if btrfs filesystem sync /home >/dev/null 2>&1; then
+        echo "✓ Committed deletions to disk (filesystem sync)"
+    else
+        echo "⚠ WARNING: 'btrfs filesystem sync /home' failed"
+    fi
+
+    # Show count after sync
+    local after
+    after=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
+    echo "Pending deletions after:  $after"
+
+    echo "Note: The Btrfs extent cleaner reclaims space asynchronously."
+    echo "      Counts may decrease over time even if not immediately zero."
 }
 
 # Get list of backup users (members of backupusers group)
@@ -2711,6 +2790,12 @@ case "$command" in
             exit 1
         fi
         disable_timemachine "$1"
+        ;;
+    show-pending-deletions)
+        show_pending_deletions
+        ;;
+    force-clean)
+        force_clean
         ;;
     version|--version|-v)
         echo "termiNAS User Management Tool v$VERSION"

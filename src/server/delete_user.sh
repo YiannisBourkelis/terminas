@@ -20,43 +20,50 @@ set -e
 
 # Reusable function for Btrfs space reclamation after subvolume deletion
 # Can be sourced by other scripts (e.g., manage_users.sh)
-# Args: $1 = number of deleted subvolumes (optional, defaults to checking list)
+# Args: $1 = number of deleted subvolumes (optional, for display only)
 # Returns: 0 on success, 1 on failure
 reclaim_btrfs_space() {
     local deleted_count="${1:-0}"
-    
-    # If no count provided, check how many are waiting for deletion
+
+    # If no subvolumes were deleted in this operation, nothing to do
     if [ "$deleted_count" -eq 0 ]; then
-        deleted_count=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
-    fi
-    
-    if [ "$deleted_count" -eq 0 ]; then
-        return 0  # Nothing to reclaim
-    fi
-    
-    echo "Waiting for Btrfs to reclaim disk space (max 5 minutes)..."
-    
-    # Sync subvolume deletions with timeout (waits for extent cleaner)
-    if timeout 300 btrfs subvolume sync /home &>/dev/null; then
-        echo "✓ Disk space reclaimed"
         return 0
-    else
-        local exit_code=$?
-        if [ $exit_code -eq 124 ]; then
-            echo "⚠ WARNING: Btrfs sync timed out after 5 minutes"
-            echo "  This is normal for large snapshots. Cleanup continues in background."
-            echo "  Space will be freed automatically. To check progress:"
-            echo "    sudo btrfs subvolume list -d /home"
-            echo "  If stuck after hours, try:"
-            echo "    sudo systemctl restart terminas-monitor.service"
-        else
-            echo "⚠ WARNING: Btrfs sync failed"
-            echo "  Space may not be immediately freed. Try:"
-            echo "    sudo btrfs subvolume sync /home"
-            echo "  Or restart the monitor: sudo systemctl restart terminas-monitor.service"
-        fi
-        return 1
     fi
+
+    echo "Waiting for Btrfs to finish deleting $deleted_count subvolume(s) (timeout 60s)..."
+
+    # Count pending DELETED entries before waiting
+    local before_count
+    before_count=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
+
+    # Use a 60-second timeout to avoid hanging on ancient orphaned deletions
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 60s btrfs subvolume sync /home >/dev/null 2>&1; then
+            echo "✓ Btrfs reported deletions completed within 60s"
+        else
+            echo "⚠ Timeout or error while waiting for Btrfs deletions (60s)"
+        fi
+    else
+        # Fallback without timeout if coreutils 'timeout' is unavailable
+        if btrfs subvolume sync /home >/dev/null 2>&1; then
+            echo "✓ Btrfs deletions completed"
+        else
+            echo "⚠ Error while waiting for Btrfs deletions"
+        fi
+    fi
+
+    # Show pending DELETED count after waiting
+    local after_count
+    after_count=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
+    echo "Pending deleted subvolumes: before=$before_count, after=$after_count"
+
+    if [ "$after_count" -gt 0 ]; then
+        echo "Some deletions are still pending; space will be reclaimed asynchronously."
+        echo "You can inspect details with: ./manage_users.sh show-pending-deletions"
+    fi
+
+    # Return success even on timeout to avoid failing the whole delete flow
+    return 0
 }
 
 # Parse arguments
