@@ -218,13 +218,28 @@ echo "Checking dependencies..."
 missing_deps=()
 
 if ! command -v sshpass &>/dev/null && ! command -v lftp &>/dev/null; then
-    echo -e "${YELLOW}WARNING: Neither sshpass nor lftp found - SFTP tests will be skipped${NC}"
-    echo "  Install with: apt install sshpass"
+    missing_deps+=("sshpass or lftp")
 fi
 
 if ! command -v smbclient &>/dev/null; then
-    echo -e "${YELLOW}WARNING: smbclient not found - Samba tests will be skipped${NC}"
-    echo "  Install with: apt install smbclient"
+    missing_deps+=("smbclient")
+fi
+
+if ! command -v expect &>/dev/null; then
+    missing_deps+=("expect")
+fi
+
+if [ ${#missing_deps[@]} -gt 0 ]; then
+    echo -e "${RED}ERROR: Missing required dependencies:${NC}"
+    for dep in "${missing_deps[@]}"; do
+        echo "  - $dep"
+    done
+    echo ""
+    echo "Install with:"
+    echo "  apt install sshpass smbclient expect"
+    echo ""
+    echo "Or re-run setup.sh to install all dependencies"
+    exit 1
 fi
 
 # Check if Samba is available

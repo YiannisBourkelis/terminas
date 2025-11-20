@@ -116,7 +116,7 @@ apt update && apt upgrade -y
 
 # Install required packages (removed rsync, added btrfs-progs)
 echo "Installing required packages..."
-PACKAGES="openssh-server pwgen cron inotify-tools btrfs-progs fail2ban nftables bc coreutils"
+PACKAGES="openssh-server pwgen cron inotify-tools btrfs-progs fail2ban nftables bc coreutils sshpass smbclient expect"
 if [ "$ENABLE_SAMBA" = "true" ]; then
     PACKAGES="$PACKAGES samba samba-common-bin"
     echo "  - Including Samba packages for SMB support"
