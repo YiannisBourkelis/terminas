@@ -16,6 +16,15 @@ else
     VERSION="unknown"
 fi
 
+# Source common functions
+COMMON_LIB="$SCRIPT_DIR/common.sh"
+if [ -f "$COMMON_LIB" ]; then
+    source "$COMMON_LIB"
+else
+    echo "ERROR: Cannot find common.sh library" >&2
+    exit 1
+fi
+
 set -e
 
 SCRIPT_NAME=$(basename "$0")
@@ -54,6 +63,7 @@ Commands:
     show-quota <username>      Show quota usage and limit for user
     show-pending-deletions  Show Btrfs pending deleted subvolumes under /home
     force-clean             Restart monitor and commit Btrfs deletions (non-blocking)
+    change-password <username>  Change password for user (updates SFTP and Samba if enabled)
     enable-samba <username> Enable Samba (SMB) sharing for an existing user
     disable-samba <username> Disable Samba (SMB) sharing for an existing user
     enable-samba-versions <username>  Enable read-only SMB access to versions (snapshots) directory
@@ -78,6 +88,7 @@ Examples:
     $SCRIPT_NAME set-quota testuser 100
     $SCRIPT_NAME remove-quota testuser
     $SCRIPT_NAME show-quota testuser
+    $SCRIPT_NAME change-password testuser
     $SCRIPT_NAME enable-samba testuser
     $SCRIPT_NAME enable-samba-versions testuser
     $SCRIPT_NAME disable-samba-versions testuser
@@ -207,6 +218,114 @@ show_pending_deletions() {
     echo ""
     echo "Tip: Space is reclaimed asynchronously by the Btrfs cleaner."
     echo "     You can run: $SCRIPT_NAME force-clean to commit deletions."
+}
+
+# Change password for a user (updates SFTP and Samba if enabled)
+change_password_user() {
+    local username="$1"
+    
+    if [ -z "$username" ]; then
+        echo "Error: Username is required" >&2
+        usage
+        return 1
+    fi
+    
+    # Check if user exists
+    if ! id "$username" &>/dev/null; then
+        echo "Error: User '$username' does not exist" >&2
+        return 1
+    fi
+    
+    # Check if user is a backup user
+    if ! groups "$username" 2>/dev/null | grep -q "backupusers"; then
+        echo "Error: User '$username' is not a backup user" >&2
+        return 1
+    fi
+    
+    echo "========================================="
+    echo "Change Password for: $username"
+    echo "========================================="
+    echo ""
+    
+    # Check which services are enabled
+    local has_samba=false
+    if has_samba_enabled "$username"; then
+        has_samba=true
+        echo "Services enabled: SFTP, Samba (SMB)"
+    else
+        echo "Services enabled: SFTP"
+    fi
+    echo ""
+    
+    # Prompt for new password (with confirmation)
+    local password1 password2
+    while true; do
+        read -s -p "Enter new password (30+ chars, must contain lowercase, uppercase, and numbers): " password1
+        echo ""
+        read -s -p "Confirm new password: " password2
+        echo ""
+        
+        if [ "$password1" != "$password2" ]; then
+            echo "Error: Passwords do not match. Please try again."
+            echo ""
+            continue
+        fi
+        
+        # Validate password strength using shared function
+        if validate_password "$password1" 2>/dev/null; then
+            # Password is valid
+            break
+        else
+            # Show error (validate_password already printed it to stderr)
+            echo ""
+            continue
+        fi
+    done
+    
+    echo ""
+    echo "Updating password..."
+    
+    # Update system password (SFTP)
+    if echo "$username:$password1" | chpasswd 2>/dev/null; then
+        echo "✓ SFTP password updated"
+    else
+        echo "✗ ERROR: Failed to update SFTP password" >&2
+        return 1
+    fi
+    
+    # Update Samba password if enabled
+    if [ "$has_samba" = true ]; then
+        if command -v smbpasswd &>/dev/null; then
+            if echo -e "$password1\n$password1" | smbpasswd -s "$username" 2>/dev/null; then
+                echo "✓ Samba password updated"
+            else
+                echo "✗ ERROR: Failed to update Samba password" >&2
+                echo "  SFTP password was changed but Samba password remains old"
+                echo "  You may need to manually update: smbpasswd -a $username"
+                return 1
+            fi
+        else
+            echo "⚠ WARNING: smbpasswd command not found"
+            echo "  SFTP password was changed but Samba password could not be updated"
+        fi
+    fi
+    
+    echo ""
+    echo "========================================="
+    echo "✓ Password changed successfully"
+    echo "========================================="
+    echo ""
+    echo "The new password is now active for:"
+    if [ "$has_samba" = true ]; then
+        echo "  - SFTP connections"
+        echo "  - Samba (SMB) shares"
+        if has_timemachine_enabled "$username"; then
+            echo "  - Time Machine backups"
+        fi
+    else
+        echo "  - SFTP connections"
+    fi
+    echo ""
 }
 
 # Force a non-blocking cleanup: restart monitor (to drop inotify descriptors)
@@ -554,27 +673,12 @@ get_last_samba_connection() {
     fi
 }
 
-# Check if Samba is enabled for a user
-has_samba_enabled() {
-    local username="$1"
-    # Check if Samba config file exists for this user
-    [ -f "/etc/samba/smb.conf.d/${username}.conf" ]
-}
-
 # Check if read-only Samba access to versions is enabled for a user
 has_samba_versions_enabled() {
     local username="$1"
     # Check if versions share exists in the user's main Samba config file
     local smb_conf="/etc/samba/smb.conf.d/${username}.conf"
     [ -f "$smb_conf" ] && grep -qF "[${username}-versions]" "$smb_conf" 2>/dev/null
-}
-
-# Check if Time Machine support is enabled for a user
-has_timemachine_enabled() {
-    local username="$1"
-    # Check if timemachine share exists in the user's main Samba config file
-    local smb_conf="/etc/samba/smb.conf.d/${username}.conf"
-    [ -f "$smb_conf" ] && grep -qF "[${username}-timemachine]" "$smb_conf" 2>/dev/null
 }
 
 # Enable Samba sharing for an existing user
@@ -2804,6 +2908,14 @@ case "$command" in
         ;;
     force-clean)
         force_clean
+        ;;
+    change-password)
+        if [ $# -eq 0 ]; then
+            echo "Error: Username is required for change-password command" >&2
+            usage
+            exit 1
+        fi
+        change_password_user "$1"
         ;;
     version|--version|-v)
         echo "termiNAS User Management Tool v$VERSION"

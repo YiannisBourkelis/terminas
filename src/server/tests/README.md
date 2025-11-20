@@ -4,6 +4,59 @@ This directory contains test scripts for validating termiNAS functionality.
 
 ## Available Tests
 
+### `test_create_user.sh` - User Creation and Password Change Tests
+
+Comprehensive test suite for user creation and password change functionality including:
+- User creation with auto-generated password
+- SFTP authentication with initial password
+- Samba authentication with initial password (if Samba enabled)
+- Password change via `manage_users.sh change-password`
+- SFTP authentication with new password
+- Samba authentication with new password (if Samba enabled)
+- Verification that old password is rejected
+
+**Usage:**
+```bash
+# Run all user creation and password change tests
+sudo ./test_create_user.sh
+
+# Cleanup test user and files
+sudo ./test_create_user.sh --cleanup-only
+```
+
+**Test Configuration:**
+- Test user: `terminas_test_create_user`
+- Initial password: Auto-generated 64-character secure password
+- New password: 43-character password meeting all requirements
+- Tests both SFTP and Samba (if available)
+
+**What it tests:**
+1. User creation with auto-generated password
+2. Password extraction from create_user.sh output
+3. SFTP authentication with initial password
+4. Samba authentication with initial password (if Samba installed)
+5. Password change command execution
+6. SFTP authentication with new password
+7. Samba authentication with new password (if Samba installed)
+8. Old password rejection for both SFTP and Samba
+
+**Dependencies:**
+- **Required**: openssh-server (SFTP)
+- **Optional**: sshpass or lftp (for automated SFTP tests)
+- **Optional**: samba, smbclient (for Samba tests)
+- **Optional**: expect (for automated password prompts)
+
+**Expected Output:**
+- ✓ PASS: Test succeeded
+- ✗ FAIL: Test failed (check logs)
+- ℹ INFO: Informational message
+
+**Notes:**
+- Test will skip SFTP tests if neither sshpass nor lftp is available
+- Test will skip Samba tests if Samba is not installed or running
+- Test automatically cleans up after completion
+- If expect is not available, password change may require manual intervention
+
 ### `test_quota.sh` - Quota Functionality Tests
 
 Comprehensive test suite for Btrfs quota functionality including:

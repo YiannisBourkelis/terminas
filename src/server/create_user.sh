@@ -18,37 +18,14 @@ fi
 
 set -e
 
-# Function to validate password strength
-validate_password() {
-    local password="$1"
-    local length=${#password}
-    
-    # Check minimum length (30 characters)
-    if [ "$length" -lt 30 ]; then
-        echo "ERROR: Password must be at least 30 characters long (provided: $length characters)"
-        return 1
-    fi
-    
-    # Check for lowercase letters
-    if ! echo "$password" | grep -q '[a-z]'; then
-        echo "ERROR: Password must contain at least one lowercase letter"
-        return 1
-    fi
-    
-    # Check for uppercase letters
-    if ! echo "$password" | grep -q '[A-Z]'; then
-        echo "ERROR: Password must contain at least one uppercase letter"
-        return 1
-    fi
-    
-    # Check for numbers
-    if ! echo "$password" | grep -q '[0-9]'; then
-        echo "ERROR: Password must contain at least one number"
-        return 1
-    fi
-    
-    return 0
-}
+# Source common functions
+COMMON_LIB="$SCRIPT_DIR/common.sh"
+if [ -f "$COMMON_LIB" ]; then
+    source "$COMMON_LIB"
+else
+    echo "ERROR: Cannot find common.sh library"
+    exit 1
+fi
 
 # Function to setup Samba share with strict security
 setup_samba_share() {

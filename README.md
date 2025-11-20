@@ -552,6 +552,56 @@ sudo ./src/server/manage_users.sh delete <username>
 ```
 Removes the user account and all their data (requires confirmation).
 
+**Change password for a user:**
+```bash
+sudo ./src/server/manage_users.sh change-password <username>
+```
+Changes the password for an existing backup user. Updates authentication for:
+- SFTP connections (always)
+- Samba (SMB) shares (if enabled)
+- Time Machine backups (uses Samba password)
+
+**Features:**
+- Interactive password prompts with confirmation
+- Validates password strength (30+ characters, mixed case, numbers)
+- Automatically detects which services are enabled
+- Atomic updates - rollback warnings if partial failure
+
+**Example session:**
+```
+=========================================
+Change Password for: produser
+=========================================
+
+Services enabled: SFTP, Samba (SMB)
+
+Enter new password (30+ chars, must contain lowercase, uppercase, and numbers): ********
+Confirm new password: ********
+
+Updating password...
+✓ SFTP password updated
+✓ Samba password updated
+
+=========================================
+✓ Password changed successfully
+=========================================
+
+The new password is now active for:
+  - SFTP connections
+  - Samba (SMB) shares
+  - Time Machine backups
+```
+
+**Enable/Disable Samba for existing users:**
+```bash
+# Enable Samba (SMB) sharing
+sudo ./src/server/manage_users.sh enable-samba <username>
+
+# Disable Samba (SMB) sharing
+sudo ./src/server/manage_users.sh disable-samba <username>
+```
+Enables or disables SMB/Samba access for an existing user. When enabled, creates the `username-backup` share for the uploads directory.
+
 **Enable/Disable read-only SMB access to versions (snapshots):**
 ```bash
 # Enable read-only access to snapshots via SMB (for disaster recovery)
@@ -576,6 +626,55 @@ sudo ./src/server/manage_users.sh disable-samba-versions <username>
 3. User connects via `\\server\username-versions` in Windows Explorer
 4. User browses timestamped snapshots and restores needed files
 5. After recovery, admin disables access: `disable-samba-versions username`
+
+**Manage storage quotas:**
+```bash
+# Set quota for user (in GB)
+sudo ./src/server/manage_users.sh set-quota <username> <GB>
+
+# Example: Set 100GB quota
+sudo ./src/server/manage_users.sh set-quota produser 100
+
+# Show quota status
+sudo ./src/server/manage_users.sh show-quota <username>
+
+# Remove quota (unlimited storage)
+sudo ./src/server/manage_users.sh remove-quota <username>
+```
+
+Quota management controls physical disk usage (uploads + all snapshots with Btrfs deduplication). See [Storage Quota Management](#storage-quota-management) section for details.
+
+**Inspect and force Btrfs cleanup:**
+```bash
+# Show pending deleted subvolumes (diagnostic)
+sudo ./src/server/manage_users.sh show-pending-deletions
+
+# Force cleanup (restart monitor + filesystem sync)
+sudo ./src/server/manage_users.sh force-clean
+```
+
+**When to use:**
+- After deleting users or snapshots, you may see lingering "DELETED" entries
+- `show-pending-deletions` lists these pending deletions under `/home`
+- `force-clean` restarts the monitor service and commits Btrfs metadata non-blocking
+- The async Btrfs cleaner will reclaim space in the background
+- Useful for immediate cleanup after bulk operations
+
+**Example:**
+```bash
+$ sudo ./src/server/manage_users.sh show-pending-deletions
+Pending Btrfs deletions under /home: 3
+
+$ sudo ./src/server/manage_users.sh force-clean
+Pending deletions before: 3
+Restarting monitor service...
+✓ Monitor service restarted
+Committing filesystem metadata...
+✓ Filesystem sync complete
+Pending deletions after: 0
+
+✓ Cleanup complete (non-blocking - kernel cleaner will reclaim space)
+```
 
 #### macOS Time Machine Support
 
