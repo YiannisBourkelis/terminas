@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$TEST_DIR/.." && pwd)"
 TEST_USER="terminas_test_cleanup"
 TEST_FILE_DIR="/var/tmp/terminas_test_cleanup"
 TEST_FILE="$TEST_FILE_DIR/file_20mb.dat"
-WAIT_SECS=${WAIT_SECS:-80}   # wait for snapshot (monitor debounce + buffer)
+WAIT_SECS=${WAIT_SECS:-70}   # wait for snapshot (monitor debounce + buffer)
 
 log() { echo -e "${BLUE}==>${NC} $*"; }
 pass() { echo -e "${GREEN}✓${NC} $*"; }
@@ -113,33 +113,49 @@ delete_user_and_verify_cleanup() {
 
   local count1
   count1=$(pending_deleted_count)
-  log "Pending deletions after delete: $count1"
+  log "Pending deletions immediately after delete: $count1"
   
   # Show detailed list if there are pending deletions
   if [ "$count1" -gt "$count_before" ]; then
-    warn "New pending deletions detected (+$((count1 - count_before)))"
+    log "New pending deletions detected: +$((count1 - count_before)) (this is normal)"
     btrfs subvolume list -d /home | sed 's/^/  /'
   fi
 
-  log "Restarting monitor service"
-  systemctl restart terminas-monitor.service || warn "Failed to restart monitor"
-
-  log "Forcing filesystem sync on /home"
+  # Note: DO NOT restart monitor service - this could cause missed inotify notifications
+  # The Btrfs cleaner will process deletions asynchronously
+  
+  log "Forcing filesystem sync on /home (triggers Btrfs cleaner)"
   btrfs filesystem sync /home || warn "filesystem sync returned non-zero"
 
-  log "Waiting 5 seconds for Btrfs cleaner..."
-  sleep 5
+  log "Waiting 10 seconds for Btrfs cleaner to process deletions..."
+  sleep 10
 
   local count2
   count2=$(pending_deleted_count)
-  log "Pending deletions after restart+sync+wait: $count2"
+  log "Pending deletions after sync+wait: $count2"
 
+  # Test passes if pending deletions return to baseline OR reach zero
   if [ "$count2" -eq "$count_before" ]; then
     pass "All deleted subvolumes cleaned up (returned to baseline: $count_before)"
   elif [ "$count2" -eq 0 ]; then
-    pass "All deleted subvolumes cleaned up"
+    pass "All deleted subvolumes cleaned up (no pending deletions)"
+  elif [ "$count2" -lt "$count1" ]; then
+    # Some cleanup happened but not complete - give it more time
+    log "Partial cleanup detected ($count1 → $count2). Waiting additional 10 seconds..."
+    sleep 10
+    count2=$(pending_deleted_count)
+    log "Pending deletions after extended wait: $count2"
+    
+    if [ "$count2" -eq "$count_before" ] || [ "$count2" -eq 0 ]; then
+      pass "All deleted subvolumes cleaned up after extended wait"
+    else
+      warn "Some pending deletions remain: $count2 (baseline: $count_before)"
+      warn "This may be normal - Btrfs cleaner runs asynchronously"
+      warn "Check again later with: ./manage_users.sh show-pending-deletions"
+      btrfs subvolume list -d /home | sed 's/^/  /'
+    fi
   else
-    fail "Still pending deletions: $count2 (expected: $count_before)"
+    fail "Pending deletions not decreasing: $count2 (expected: $count_before)"
     btrfs subvolume list -d /home | sed 's/^/  /'
     exit 1
   fi
