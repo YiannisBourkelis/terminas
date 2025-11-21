@@ -130,15 +130,74 @@ groupadd -f backupusers
 # Configure SSH
 echo "Configuring SSH..."
 
-# Only modify if not already set
-if ! grep -q "^PermitRootLogin no" /etc/ssh/sshd_config; then
-    sed -i 's/#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    echo "  - Set PermitRootLogin to no"
+# Check SSH security settings (but don't modify them automatically)
+PERMIT_ROOT=$(grep "^PermitRootLogin" /etc/ssh/sshd_config 2>/dev/null || echo "")
+PASSWORD_AUTH=$(grep "^PasswordAuthentication" /etc/ssh/sshd_config 2>/dev/null || echo "")
+
+SSH_WARNINGS=()
+
+if ! echo "$PERMIT_ROOT" | grep -q "^PermitRootLogin no"; then
+    SSH_WARNINGS+=("PermitRootLogin is not set to 'no'")
 fi
 
-if ! grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config; then
-    sed -i 's/#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-    echo "  - Enabled PasswordAuthentication"
+if ! echo "$PASSWORD_AUTH" | grep -q "^PasswordAuthentication yes"; then
+    SSH_WARNINGS+=("PasswordAuthentication is not set to 'yes'")
+fi
+
+if [ ${#SSH_WARNINGS[@]} -gt 0 ]; then
+    echo ""
+    echo "=========================================="
+    echo "⚠ SSH Configuration Recommendations"
+    echo "=========================================="
+    echo ""
+    echo "The following SSH settings should be configured for termiNAS:"
+    echo ""
+    for warning in "${SSH_WARNINGS[@]}"; do
+        echo "  ⚠ $warning"
+    done
+    echo ""
+    echo "Recommended configuration in /etc/ssh/sshd_config:"
+    echo "  PermitRootLogin no"
+    echo "  PasswordAuthentication yes  (or use public key authentication - see below)"
+    echo ""
+    echo "Security Note: Public key authentication is MORE SECURE than passwords."
+    echo "If you prefer public keys over passwords:"
+    echo "  - Set: PubkeyAuthentication yes"
+    echo "  - Set: PasswordAuthentication no"
+    echo "  - Add your public key to ~/.ssh/authorized_keys for each user"
+    echo "  - termiNAS backup users support both password and key-based authentication"
+    echo ""
+    echo "⚠ IMPORTANT - Before making these changes:"
+    echo "  1. Create a non-root user:"
+    echo "     adduser yourusername"
+    echo ""
+    echo "  2. (Optional) Set up SSH key for the new user:"
+    echo "     mkdir -p /home/yourusername/.ssh"
+    echo "     echo 'your-public-key-here' >> /home/yourusername/.ssh/authorized_keys"
+    echo "     chmod 700 /home/yourusername/.ssh"
+    echo "     chmod 600 /home/yourusername/.ssh/authorized_keys"
+    echo "     chown -R yourusername:yourusername /home/yourusername/.ssh"
+    echo ""
+    echo "  3. Test SSH login with the new user in a NEW terminal"
+    echo "     (keep this session open as backup)"
+    echo ""
+    echo "  4. Verify you can escalate to root using 'su -' with the new user"
+    echo ""
+    echo "  5. After confirming the new user works, edit /etc/ssh/sshd_config:"
+    echo "     nano /etc/ssh/sshd_config"
+    echo "     Set: PermitRootLogin no"
+    echo "     Set: PasswordAuthentication yes (or no if using keys only)"
+    echo "     Set: PubkeyAuthentication yes (if using keys)"
+    echo ""
+    echo "  6. Restart SSH service:"
+    echo "     systemctl restart ssh"
+    echo ""
+    echo "Note: Don't add the user to sudo group unless necessary - use 'su -' instead."
+    echo "These changes are optional but strongly recommended for security."
+    echo "Setup will continue without modifying your SSH configuration."
+    echo "=========================================="
+    echo ""
+    read -p "Press Enter to continue with setup..."
 fi
 
 # Enable internal-sftp subsystem (check if already configured)
