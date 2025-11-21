@@ -188,8 +188,23 @@ if [ -d "/home/$USERNAME" ]; then
         reclaim_btrfs_space $total_deleted
     fi
     
-    # Remove home directory
-    rm -rf "/home/$USERNAME"
+    # Check if /home/<username> itself is a Btrfs subvolume (created by useradd -m on Btrfs)
+    # If yes, delete it as a subvolume. If no, remove it as a regular directory.
+    if btrfs subvolume show "/home/$USERNAME" &>/dev/null; then
+        echo "  Deleting home directory subvolume..."
+        if btrfs subvolume delete "/home/$USERNAME" >/dev/null 2>&1; then
+            total_deleted=$((total_deleted + 1))
+            echo "  ✓ Deleted home directory subvolume"
+            # Reclaim space from the home directory subvolume deletion
+            reclaim_btrfs_space 1
+        else
+            echo "  ⚠ WARNING: Failed to delete home directory subvolume, using rm -rf"
+            rm -rf "/home/$USERNAME"
+        fi
+    else
+        # Not a subvolume, remove as regular directory
+        rm -rf "/home/$USERNAME"
+    fi
 fi
 
 # Remove any runtime files

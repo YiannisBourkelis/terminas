@@ -57,6 +57,57 @@ sudo ./test_create_user.sh --cleanup-only
 - Test automatically cleans up after completion
 - If expect is not available, password change may require manual intervention
 
+### `test_delete_user_cleanup.sh` - User Deletion and Btrfs Cleanup Tests
+
+Test suite that reproduces and verifies the Btrfs subvolume cleanup issue after user deletion.
+This test validates that all Btrfs subvolumes are properly deleted and no pending deletions remain.
+
+**Background:**
+When `useradd -m` creates a user on a Btrfs filesystem, it may create `/home/<username>` as a Btrfs
+subvolume rather than a regular directory. The delete_user.sh script must explicitly delete this
+home directory subvolume, otherwise it remains as a pending deletion.
+
+**Usage:**
+```bash
+# Run deletion cleanup test
+sudo ./test_delete_user_cleanup.sh
+```
+
+**Test Configuration:**
+- Test user: `terminas_test_cleanup` (with unique PID suffix)
+- Creates 20MB test file
+- Waits 80s for snapshot creation
+- Checks pending deletions before/after user deletion
+
+**What it tests:**
+1. Baseline pending deletions count
+2. User creation with quota
+3. File upload and snapshot creation
+4. Detection of home directory as subvolume vs regular directory
+5. User deletion process
+6. Verification that home directory is removed
+7. Pending deletions after user deletion
+8. Btrfs cleaner operation after sync
+9. Return to baseline pending deletions count
+
+**Root Cause:**
+On Btrfs filesystems, `useradd -m` creates `/home/<username>` as a Btrfs subvolume.
+The fix requires checking if the home directory is a subvolume and explicitly deleting it
+using `btrfs subvolume delete` instead of `rm -rf`.
+
+**Expected Output:**
+- Diagnostic info about home directory (subvolume vs regular directory)
+- List of subvolumes for the test user
+- Pending deletions count at each step
+- ✓ PASS: All deleted subvolumes cleaned up (returned to baseline)
+- ✗ FAIL: Still pending deletions (indicates cleanup issue)
+
+**Notes:**
+- Test automatically cleans up test user
+- Requires Btrfs on `/home`
+- Must run as root
+- Restarts terminas-monitor.service during test
+
 ### `test_quota.sh` - Quota Functionality Tests
 
 Comprehensive test suite for Btrfs quota functionality including:

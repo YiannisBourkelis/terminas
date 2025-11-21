@@ -60,6 +60,17 @@ create_user_and_snapshot() {
     fail "Failed to create test user; see /tmp/create_$TEST_USER.log"; exit 1;
   }
   pass "User created"
+  
+  # Diagnostic: Check if home directory is a subvolume
+  if btrfs subvolume show "/home/$TEST_USER" &>/dev/null; then
+    log "Detected: /home/$TEST_USER is a Btrfs subvolume (created by useradd -m)"
+  else
+    log "Detected: /home/$TEST_USER is a regular directory"
+  fi
+  
+  # Diagnostic: List all subvolumes for this user
+  log "Subvolumes for $TEST_USER:"
+  btrfs subvolume list /home | grep "$TEST_USER" | sed 's/^/  /' || echo "  (none found)"
 
   mkdir -p "$TEST_FILE_DIR"
   log "Creating 20MB test file"
@@ -84,12 +95,31 @@ create_user_and_snapshot() {
 }
 
 delete_user_and_verify_cleanup() {
+  # Check pending deletions BEFORE user deletion (baseline)
+  local count_before
+  count_before=$(pending_deleted_count)
+  log "Pending deletions before user deletion: $count_before"
+  
   log "Deleting test user"
-  "$SCRIPT_DIR/delete_user.sh" --force "$TEST_USER" >/tmp/delete_$TEST_USER.log 2>&1 || warn "delete_user returned non-zero (may be okay)"
+  "$SCRIPT_DIR/delete_user.sh" --force "$TEST_USER" 2>&1 | tee /tmp/delete_$TEST_USER.log
+  
+  # Check if home directory was removed
+  if [ -d "/home/$TEST_USER" ]; then
+    fail "Home directory still exists after deletion!"
+    ls -la "/home/$TEST_USER"
+  else
+    pass "Home directory removed"
+  fi
 
   local count1
   count1=$(pending_deleted_count)
-  echo "Pending deletions after delete: $count1"
+  log "Pending deletions after delete: $count1"
+  
+  # Show detailed list if there are pending deletions
+  if [ "$count1" -gt "$count_before" ]; then
+    warn "New pending deletions detected (+$((count1 - count_before)))"
+    btrfs subvolume list -d /home | sed 's/^/  /'
+  fi
 
   log "Restarting monitor service"
   systemctl restart terminas-monitor.service || warn "Failed to restart monitor"
@@ -97,15 +127,21 @@ delete_user_and_verify_cleanup() {
   log "Forcing filesystem sync on /home"
   btrfs filesystem sync /home || warn "filesystem sync returned non-zero"
 
+  log "Waiting 5 seconds for Btrfs cleaner..."
+  sleep 5
+
   local count2
   count2=$(pending_deleted_count)
-  echo "Pending deletions after restart+sync: $count2"
+  log "Pending deletions after restart+sync+wait: $count2"
 
-  if [ "$count2" -eq 0 ]; then
+  if [ "$count2" -eq "$count_before" ]; then
+    pass "All deleted subvolumes cleaned up (returned to baseline: $count_before)"
+  elif [ "$count2" -eq 0 ]; then
     pass "All deleted subvolumes cleaned up"
   else
-    warn "Still pending deletions: $count2"
+    fail "Still pending deletions: $count2 (expected: $count_before)"
     btrfs subvolume list -d /home | sed 's/^/  /'
+    exit 1
   fi
 }
 
