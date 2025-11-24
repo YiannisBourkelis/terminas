@@ -559,9 +559,14 @@ echo "\$(date '+%F %T') Commit: $TERMINAS_COMMIT" >> "\$LOG"
 echo "\$(date '+%F %T') ========================================" >> "\$LOG"
 
 # Watch /home recursively and react to close_write events
-# IMPORTANT: Exclude /home/<user>/versions/ directories to prevent holding file descriptors
-# that would block Btrfs extent cleaner from reclaiming space after snapshot deletion
-# Pattern: ^/home/[^/]+/versions(/|$) matches /home/<user>/versions/ but NOT /home/<user>/uploads/versions/
+# Exclude /home/<user>/versions/ directories - no need to monitor snapshot directories
+# since users only upload to /home/<user>/uploads/
+#
+# NOTE ON BTRFS CLEANER: When a user is deleted, the background monitoring subprocess
+# for that user (spawned below) must be killed to release file descriptor references
+# to the deleted directories. This is handled automatically by delete_user.sh.
+#
+# Pattern: '^/home/[^/]+/versions(/|$)' matches /home/<user>/versions/ and subdirs
 # close_write: fired when a file is written and closed
 # This captures both direct uploads and atomic uploads (temp files)
 # Strategy: Debounce with inactivity window to coalesce multiple uploads

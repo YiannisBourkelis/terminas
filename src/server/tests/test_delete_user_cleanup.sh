@@ -1,12 +1,16 @@
 #!/bin/bash
 
 # test_delete_user_cleanup.sh - Verify Btrfs subvolume deletion after user removal
-# Creates a test user, triggers a snapshot, deletes the user, and verifies that all
-# subvolumes are properly marked for deletion by the Btrfs cleaner.
+# Creates a test user, triggers a snapshot, deletes the user, and verifies that
+# the Btrfs cleaner can immediately reclaim space.
 #
-# Note: Btrfs cleaner processes deletions asynchronously. Some pending deletions
-# immediately after user deletion are normal and expected. The test verifies that
-# delete_user.sh properly deletes all subvolumes, not that cleanup completes instantly.
+# Root Cause: Background monitoring subprocesses (spawned by terminas-monitor.sh)
+# hold file descriptor references to /home/<user>/uploads directories. When a user
+# is deleted, if the monitoring subprocess is still running, it blocks the Btrfs
+# cleaner from reclaiming space.
+#
+# Solution: delete_user.sh kills the background monitoring subprocess for the deleted
+# user before removing directories, allowing immediate cleanup.
 #
 # Usage:
 #   sudo ./test_delete_user_cleanup.sh
@@ -125,19 +129,8 @@ delete_user_and_verify_cleanup() {
     btrfs subvolume list -d /home | sed 's/^/  /'
   fi
 
-  # Check if monitor service has open file handles that might block cleanup
-  log "Checking for open file handles on deleted subvolumes..."
-  local open_handles
-  open_handles=$(lsof 2>/dev/null | grep -c "/home/$TEST_USER" || echo "0")
-  if [ "$open_handles" -gt 0 ]; then
-    warn "Found $open_handles open file handle(s) on deleted user directory"
-    log "This may prevent Btrfs cleaner from reclaiming space immediately"
-  else
-    log "No open file handles detected"
-  fi
-  
-  # Note: We intentionally do NOT restart monitor service to avoid missing inotify notifications
-  # during the test. The Btrfs cleaner will process deletions asynchronously.
+  # Note: delete_user.sh should have killed the background monitoring subprocess
+  # for this user before deleting directories. No monitor restart needed.
   
   log "Forcing filesystem sync on /home (triggers Btrfs cleaner)"
   btrfs filesystem sync /home || warn "filesystem sync returned non-zero"
@@ -154,41 +147,22 @@ delete_user_and_verify_cleanup() {
     pass "All deleted subvolumes cleaned up (returned to baseline: $count_before)"
   elif [ "$count2" -eq 0 ]; then
     pass "All deleted subvolumes cleaned up (no pending deletions)"
-  elif [ "$count2" -lt "$count1" ]; then
-    # Some cleanup happened but not complete - give it more time
-    log "Partial cleanup detected ($count1 → $count2). Waiting additional 10 seconds..."
-    sleep 10
-    count2=$(pending_deleted_count)
-    log "Pending deletions after extended wait: $count2"
-    
-    if [ "$count2" -eq "$count_before" ] || [ "$count2" -eq 0 ]; then
-      pass "All deleted subvolumes cleaned up after extended wait"
-    else
-      warn "Some pending deletions remain: $count2 (baseline: $count_before)"
-      warn "This is expected behavior - Btrfs cleaner runs asynchronously"
-      warn "The deletion will complete in the background within a few minutes"
-      warn "You can verify with: ./manage_users.sh show-pending-deletions"
-      pass "Test PASSED - deletion process is working correctly"
-      return 0
-    fi
   else
-    # Still have pending deletions after wait - this is actually OK for this test
-    # The key success criterion is that delete_user.sh properly deleted all subvolumes
-    # and the cleaner will process them asynchronously
-    warn "Pending deletions remain: $count2 (baseline: $count_before)"
+    # Still have pending deletions - this should NOT happen if subprocess was killed properly
+    fail "Pending deletions remain after cleanup: $count2 (expected: $count_before)"
+    log "This indicates the background monitoring subprocess was not killed properly"
+    btrfs subvolume list -d /home | sed 's/^/  /'
     
-    # Check if the deletion count matches what we expect (uploads + snapshots)
-    local expected_deletions=$((count1 - count_before))
-    if [ "$count2" -eq "$expected_deletions" ]; then
-      log "Deletion count matches expected ($expected_deletions subvolumes deleted)"
-      log "The Btrfs cleaner will process these asynchronously"
-      pass "Test PASSED - all subvolumes properly marked for deletion"
-      return 0
+    # Check if open file handles exist
+    log "Checking for open file handles..."
+    if lsof +D /home 2>/dev/null | grep -q "$TEST_USER"; then
+      fail "Found open file handles on deleted user directory!"
+      lsof +D /home 2>/dev/null | grep "$TEST_USER" | head -n 10 | sed 's/^/  /'
     else
-      fail "Unexpected pending deletion count: $count2 (expected: $count_before or $expected_deletions)"
-      btrfs subvolume list -d /home | sed 's/^/  /'
-      exit 1
+      warn "No open file handles found, but deletions still pending"
+      warn "Btrfs cleaner may need more time - this is unusual"
     fi
+    exit 1
   fi
 }
 

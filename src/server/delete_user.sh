@@ -90,6 +90,17 @@ fi
 echo ""
 echo "Deleting user $USERNAME..."
 
+# Kill the background monitoring subprocess for this user (runs as root)
+# This process may be holding file descriptors on /home/$USERNAME/uploads
+if [ -f "/var/run/terminas/processing_$USERNAME" ]; then
+    monitor_pid=$(cat "/var/run/terminas/processing_$USERNAME" 2>/dev/null)
+    if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
+        echo "Stopping background monitor process for $USERNAME (PID $monitor_pid)..."
+        kill "$monitor_pid" 2>/dev/null || true
+        sleep 1  # Give it time to exit gracefully
+    fi
+fi
+
 # Kill any processes owned by the user
 pkill -u "$USERNAME" 2>/dev/null || true
 

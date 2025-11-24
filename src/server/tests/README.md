@@ -90,23 +90,30 @@ sudo ./test_delete_user_cleanup.sh
 8. Btrfs cleaner operation after sync
 9. Return to baseline pending deletions count
 
-**Root Cause:**
-On Btrfs filesystems, `useradd -m` creates `/home/<username>` as a Btrfs subvolume.
-The fix requires checking if the home directory is a subvolume and explicitly deleting it
-using `btrfs subvolume delete` instead of `rm -rf`.
+**Root Causes Identified:**
+1. **Home directory as subvolume**: On Btrfs, `useradd -m` creates `/home/<username>` as a 
+   subvolume rather than a regular directory. Solution: Check if home is a subvolume and 
+   delete it explicitly with `btrfs subvolume delete` instead of `rm -rf`.
+
+2. **Background monitoring subprocess holding file descriptors**: The monitor service spawns
+   background subprocesses (running as root) that periodically check if `/home/<user>/uploads`
+   exists. These subprocesses hold file descriptor references to the user's directory tree.
+   When a user is deleted, if the monitoring subprocess is still running, it prevents the
+   Btrfs cleaner from reclaiming space. Solution: `delete_user.sh` kills the background
+   monitoring subprocess for the deleted user before removing directories.
 
 **Expected Output:**
 - Diagnostic info about home directory (subvolume vs regular directory)
 - List of subvolumes for the test user
 - Pending deletions count at each step
 - ✓ PASS: All deleted subvolumes cleaned up (returned to baseline)
-- ✗ FAIL: Still pending deletions (indicates cleanup issue)
+- ✗ FAIL: Still pending deletions (indicates background subprocess not killed properly)
 
 **Notes:**
 - Test automatically cleans up test user
 - Requires Btrfs on `/home`
 - Must run as root
-- Restarts terminas-monitor.service during test
+- Verifies that background monitoring subprocesses are properly terminated
 
 ### `test_quota.sh` - Quota Functionality Tests
 
