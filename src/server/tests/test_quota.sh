@@ -360,81 +360,104 @@ else
 fi
 
 # TEST 6: Try to exceed quota limit
-print_header "TEST 6/10: Test Quota Enforcement (Snapshot Blocked)"
+print_header "TEST 6/10: Test Quota Enforcement (File Upload Blocked)"
+
+# NOTE: Quota is enforced using EXCLUSIVE (physical) bytes, not REFERENCED (logical).
+# With Btrfs CoW, snapshots share blocks with uploads and add ~0 bytes to exclusive usage.
+# Only the uploads folder (and any modified/unique data) counts toward quota.
+# With 1GB limit and 300MB files, we need ~4 files in uploads to exceed the limit.
+# Quota enforcement happens on FILE UPLOADS, not snapshot creation.
 
 echo "Creating third test file (${TEST_FILE_SIZE_MB}MB)..."
 TEST_FILE_3="$TEST_FILES_DIR/test_file_3.dat"
 # Use /dev/urandom for unique data (prevents Btrfs deduplication)
 dd if=/dev/urandom of="$TEST_FILE_3" bs=10M count=$((TEST_FILE_SIZE_MB / 10)) status=progress 2>&1 | grep -v records || true
 
-echo "Copying third file (will bring usage to ~87%)..."
-cp "$TEST_FILE_3" "/home/$TEST_USER/uploads/"
-chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_3.dat"
+echo "Copying third file (testing quota enforcement)..."
+QUOTA_BLOCKED_AT=""
+if cp "$TEST_FILE_3" "/home/$TEST_USER/uploads/" 2>/tmp/cp3_error.txt; then
+    chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_3.dat"
+    echo "✓ Third file copied successfully"
+else
+    if grep -q "Disk quota exceeded" /tmp/cp3_error.txt; then
+        QUOTA_BLOCKED_AT="file3"
+        print_result "PASS" "Btrfs blocked third file upload (Disk quota exceeded)"
+    else
+        print_result "FAIL" "Third file copy failed for unexpected reason"
+        cat /tmp/cp3_error.txt
+    fi
+fi
 
-echo "Waiting ${MONITOR_WAIT_TIME}s for monitor to create snapshot..."
-sleep "$MONITOR_WAIT_TIME"
+if [ -z "$QUOTA_BLOCKED_AT" ]; then
+    echo "Waiting ${MONITOR_WAIT_TIME}s for monitor to create snapshot..."
+    sleep "$MONITOR_WAIT_TIME"
+fi
 
 # Rescan quota to ensure accurate accounting
 echo "Updating quota accounting..."
 btrfs quota rescan -w /home 2>/dev/null || true
 
-# Check quota - should be around 87% now (0.87GB / 1GB)
+# Check current quota usage
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" > /tmp/quota_output.txt 2>&1
 current_usage=$(grep "Current usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
-print_result "INFO" "Quota usage after third file: $current_usage"
+print_result "INFO" "Quota usage after third file attempt: $current_usage"
 
-# Now create a fourth file to push over quota limit
-echo "Creating fourth test file (${TEST_FILE_SIZE_MB}MB) to exceed quota..."
-TEST_FILE_4="$TEST_FILES_DIR/test_file_4.dat"
-# Use /dev/urandom for unique data (prevents Btrfs deduplication)
-dd if=/dev/urandom of="$TEST_FILE_4" bs=10M count=$((TEST_FILE_SIZE_MB / 10)) status=progress 2>&1 | grep -v records || true
+# Now create a fourth file to push over quota limit (if not already blocked)
+if [ -z "$QUOTA_BLOCKED_AT" ]; then
+    echo "Creating fourth test file (${TEST_FILE_SIZE_MB}MB) to exceed quota..."
+    TEST_FILE_4="$TEST_FILES_DIR/test_file_4.dat"
+    # Use /dev/urandom for unique data (prevents Btrfs deduplication)
+    dd if=/dev/urandom of="$TEST_FILE_4" bs=10M count=$((TEST_FILE_SIZE_MB / 10)) status=progress 2>&1 | grep -v records || true
 
-echo "Attempting to copy fourth file (should be blocked by Btrfs quota)..."
-if cp "$TEST_FILE_4" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
-    chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_4.dat"
-    print_result "INFO" "File copy succeeded (quota not enforced or limit not reached yet)"
+    echo "Attempting to copy fourth file (should be blocked by Btrfs quota)..."
+    if cp "$TEST_FILE_4" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
+        chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_4.dat"
+        print_result "INFO" "File copy succeeded (quota not enforced or limit not reached yet)"
+    else
+        if grep -q "Disk quota exceeded" /tmp/cp_error.txt; then
+            QUOTA_BLOCKED_AT="file4"
+            print_result "PASS" "Btrfs blocked file upload (Disk quota exceeded)"
+        else
+            print_result "FAIL" "File copy failed for unexpected reason"
+            cat /tmp/cp_error.txt
+            exit 1
+        fi
+    fi
+
+    # Only wait for snapshot if file was successfully copied
+    if [ -f "/home/$TEST_USER/uploads/test_file_4.dat" ]; then
+        # Get snapshot count before attempting snapshot of over-quota state
+        snapshot_count_before=$(find "/home/$TEST_USER/versions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        
+        echo "Waiting ${MONITOR_WAIT_TIME}s for monitor to attempt snapshot..."
+        sleep "$MONITOR_WAIT_TIME"
+        
+        # Get snapshot count after
+        snapshot_count_after=$(find "/home/$TEST_USER/versions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+        
+        # With exclusive quota, snapshots are essentially free (share blocks via CoW)
+        # So snapshots should still be created even when near/at quota limit
+        if [ "$snapshot_count_after" -gt "$snapshot_count_before" ]; then
+            print_result "PASS" "Snapshot created (expected - snapshots are free with exclusive quota)"
+        else
+            print_result "INFO" "No snapshot created (monitor may have blocked due to pre-check)"
+        fi
+        
+        # Check logs for quota warnings/errors
+        tail -100 /var/log/terminas.log > /tmp/recent_log.txt
+        
+        if grep -q "WARNING.*approaching quota limit" /tmp/recent_log.txt; then
+            print_result "PASS" "Quota warning logged in terminas.log"
+        fi
+        
+        if grep -q "ERROR.*over quota\|at/over quota" /tmp/recent_log.txt; then
+            print_result "INFO" "Quota error logged (pre-check blocked snapshot)"
+        fi
+    else
+        print_result "PASS" "Quota enforcement working - file upload blocked"
+    fi
 else
-    if grep -q "Disk quota exceeded" /tmp/cp_error.txt; then
-        print_result "PASS" "Btrfs blocked file upload (Disk quota exceeded)"
-    else
-        print_result "FAIL" "File copy failed for unexpected reason"
-        cat /tmp/cp_error.txt
-        exit 1
-    fi
-fi
-
-# Only wait for snapshot if file was successfully copied
-if [ -f "/home/$TEST_USER/uploads/test_file_4.dat" ]; then
-    # Get snapshot count before attempting snapshot of over-quota state
-    snapshot_count_before=$(find "/home/$TEST_USER/versions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    
-    echo "Waiting ${MONITOR_WAIT_TIME}s for monitor to attempt snapshot..."
-    sleep "$MONITOR_WAIT_TIME"
-    
-    # Get snapshot count after
-    snapshot_count_after=$(find "/home/$TEST_USER/versions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    
-    # Check if snapshot was blocked (count should remain the same)
-    if [ "$snapshot_count_after" -eq "$snapshot_count_before" ]; then
-        print_result "PASS" "Snapshot was blocked (count unchanged: $snapshot_count_after)"
-    else
-        print_result "INFO" "Snapshot was created (Btrfs CoW allows snapshot even near quota)"
-    fi
-    
-    # Check logs for quota error
-    tail -100 /var/log/terminas.log > /tmp/recent_log.txt
-    
-    if grep -q "ERROR.*over quota\|at/over quota" /tmp/recent_log.txt; then
-        print_result "PASS" "Quota error logged in terminas.log"
-    else
-        print_result "INFO" "No quota error in logs (may not have reached 100% yet)"
-    fi
-    
-    if grep -q "Snapshot creation blocked - user must free up space" /tmp/recent_log.txt; then
-        print_result "PASS" "Proper error message logged"
-    fi
-else
-    print_result "PASS" "Quota enforcement working - file upload blocked before snapshot needed"
+    print_result "PASS" "Quota already blocked at third file - quota enforcement working"
 fi
 
 # Check quota status
@@ -549,7 +572,7 @@ echo ""
 rm -rf "$TEST_FILES_DIR"
 rm -f /tmp/create_user_output.txt /tmp/quota_output.txt
 rm -f /tmp/set_quota_output.txt /tmp/remove_quota_output.txt /tmp/info_output.txt
-rm -f /tmp/recent_log.txt /tmp/recent_user_log.txt /tmp/cp2_error.txt /tmp/cp_error.txt
+rm -f /tmp/recent_log.txt /tmp/recent_user_log.txt /tmp/cp2_error.txt /tmp/cp3_error.txt /tmp/cp_error.txt
 
 echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
 echo -e "${GREEN}  All Tests Completed!${NC}"

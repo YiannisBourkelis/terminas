@@ -701,17 +701,19 @@ while read path event; do
             if [ -n "\$subvol_id" ]; then
                 qgroup_id="1/\$subvol_id"
                 
-                # Get quota usage (raw bytes)
+                # Get quota usage (raw bytes) - use excl (exclusive/physical) not rfer (referenced/logical)
+                # excl accounts for CoW/deduplication, so shared blocks are only counted once
                 qgroup_info=\$(btrfs qgroup show --raw /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
-                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$2}')
+                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$3}')
                 
                 # Get quota limit (need -re flag to show limit columns)
+                # Column 5 is max_excl (exclusive/physical limit)
                 limit_info=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
-                limit_bytes=\$(echo "\$limit_info" | awk '{print \$4}')
+                limit_bytes=\$(echo "\$limit_info" | awk '{print \$5}')
                 
                 if [ -n "\$qgroup_info" ]; then
-                    # Parse: qgroupid rfer excl (from qgroup_info)
-                    # And: qgroupid rfer excl max_rfer max_excl (from limit_info)
+                    # Parse: qgroupid rfer excl (from qgroup_info) - we use excl (physical)
+                    # And: qgroupid rfer excl max_rfer max_excl (from limit_info) - we use max_excl
                     
                     # Check if limit is set
                     if [ "\$limit_bytes" != "0" ] && [ "\$limit_bytes" != "none" ] && [ -n "\$limit_bytes" ]; then

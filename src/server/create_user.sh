@@ -293,16 +293,17 @@ if [ "$QUOTA_GB" -gt 0 ]; then
             fi
             
             # Assign the uploads subvolume's qgroup (0/<subvol_id>) to our tracking qgroup
-            # Btrfs automatically assigns snapshot qgroups when snapshots are created
             if btrfs qgroup assign "0/$UPLOADS_QGROUP" "$USER_QGROUP" /home 2>/dev/null; then
                 echo "  ✓ Assigned uploads subvolume to qgroup"
             fi
             
             # Set quota limit (convert GB to bytes)
-            # This limit applies to referenced data (deduplicated size across all subvolumes)
+            # Use exclusive (-e) limit for physical disk usage (deduped/CoW-aware)
+            # This counts actual disk blocks used, not logical file sizes
+            # Snapshots sharing blocks with uploads via CoW are counted once, not twice
             QUOTA_BYTES=$((QUOTA_GB * 1024 * 1024 * 1024))
-            if btrfs qgroup limit "$QUOTA_BYTES" "$USER_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Set quota limit: ${QUOTA_GB}GB"
+            if btrfs qgroup limit -e "$QUOTA_BYTES" "$USER_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Set quota limit: ${QUOTA_GB}GB (physical/exclusive)"
             else
                 echo "  ⚠ WARNING: Failed to set quota limit"
             fi

@@ -1182,8 +1182,9 @@ get_user_quota() {
     fi
     
     # Parse qgroup output for usage: qgroupid rfer excl
-    # Get the rfer (referenced bytes) column
-    local used_bytes=$(echo "$qgroup_info" | awk '{print $2}')
+    # Get the excl (exclusive bytes) column - this is physical disk usage
+    # excl accounts for CoW/deduplication, so shared blocks are only counted once
+    local used_bytes=$(echo "$qgroup_info" | awk '{print $3}')
     
     # Get limit using btrfs qgroup show with limit columns
     # Format: qgroupid rfer excl max_rfer max_excl
@@ -1191,8 +1192,8 @@ get_user_quota() {
     local limit_bytes=""
     
     if [ -n "$limit_info" ]; then
-        # Column 4 is max_rfer (referenced data limit)
-        limit_bytes=$(echo "$limit_info" | awk '{print $4}')
+        # Column 5 is max_excl (exclusive/physical data limit)
+        limit_bytes=$(echo "$limit_info" | awk '{print $5}')
     fi
     
     # Check if limit is set (0, none, or empty means unlimited)
@@ -1269,11 +1270,11 @@ set_quota_user() {
         fi
     fi
     
-    # Set quota limit
+    # Set quota limit (exclusive/physical)
     local quota_bytes=$((quota_gb * 1024 * 1024 * 1024))
     
-    if btrfs qgroup limit "$quota_bytes" "$qgroup_id" /home 2>/dev/null; then
-        echo "✓ Set quota limit for user '$username': ${quota_gb}GB"
+    if btrfs qgroup limit -e "$quota_bytes" "$qgroup_id" /home 2>/dev/null; then
+        echo "✓ Set quota limit for user '$username': ${quota_gb}GB (physical)"
         
         # Show current usage
         local quota_info=$(get_user_quota "$username")
@@ -1406,14 +1407,14 @@ show_quota_user() {
         
         if [ "$limit_bytes" = "0" ]; then
             echo "Quota: Unlimited"
-            echo "Current usage: ${used_gb}GB"
+            echo "Current usage: ${used_gb}GB (physical/exclusive)"
         else
             local limit_gb=$(printf "%.2f" $(echo "scale=2; $limit_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
             local usage_pct=$(printf "%.1f" $(echo "scale=1; ($used_bytes / $limit_bytes) * 100" | bc 2>/dev/null || echo "0"))
             local available_bytes=$((limit_bytes - used_bytes))
             local available_gb=$(printf "%.2f" $(echo "scale=2; $available_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
             
-            echo "Quota limit: ${limit_gb}GB"
+            echo "Quota limit: ${limit_gb}GB (physical/exclusive)"
             echo "Current usage: ${used_gb}GB (${usage_pct}% used, ${available_gb}GB available)"
             
             # Warning if over threshold (only if usage_pct is a valid number)
