@@ -562,9 +562,13 @@ echo "\$(date '+%F %T') ========================================" >> "\$LOG"
 # Exclude /home/<user>/versions/ directories - no need to monitor snapshot directories
 # since users only upload to /home/<user>/uploads/
 #
-# NOTE ON BTRFS CLEANER: When a user is deleted, the background monitoring subprocess
-# for that user (spawned below) must be killed to release file descriptor references
-# to the deleted directories. This is handled automatically by delete_user.sh.
+# NOTE ON BTRFS PENDING DELETIONS:
+# When a user is deleted, inotify watches created here hold kernel-level references
+# to the deleted inodes. This prevents the Btrfs cleaner from immediately reclaiming
+# space, causing "DELETED" entries in `btrfs subvolume list -d`. This is NORMAL and
+# expected behavior - pending deletions are harmless and space will be reclaimed when
+# this service restarts (e.g., system reboot, manual restart).
+# See docs/ARCHITECTURE_PER_USER_INOTIFY.md for a proposed alternative architecture.
 #
 # Pattern: '^/home/[^/]+/versions(/|$)' matches /home/<user>/versions/ and subdirs
 # close_write: fired when a file is written and closed

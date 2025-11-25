@@ -653,12 +653,25 @@ sudo ./src/server/manage_users.sh show-pending-deletions
 sudo ./src/server/manage_users.sh force-clean
 ```
 
-**When to use:**
-- After deleting users or snapshots, you may see lingering "DELETED" entries
-- `show-pending-deletions` lists these pending deletions under `/home`
-- `force-clean` restarts the monitor service and commits Btrfs metadata non-blocking
-- The async Btrfs cleaner will reclaim space in the background
-- Useful for immediate cleanup after bulk operations
+**Understanding Pending Deletions:**
+
+After deleting users or snapshots, you may see "DELETED" entries in `btrfs subvolume list -d`. 
+This is **normal and expected behavior**. The deleted subvolumes continue to consume disk space 
+until the Btrfs cleaner completes the cleanup process.
+
+**Why This Happens:**
+
+The `terminas-monitor.sh` service uses `inotifywait` to watch `/home` for file changes. These 
+inotify watches hold kernel-level references to directory inodes. When a user is deleted, the 
+watches remain active until the monitor service restarts, which delays Btrfs space reclamation.
+
+**When to use `force-clean`:**
+- If you need to immediately reclaim disk space after bulk deletions
+- After deleting many users or cleaning up old snapshots
+- **Caution**: Restarting the monitor service may cause a brief window where file upload 
+  events could be missed. If a user's upload completes exactly when the service restarts, 
+  the snapshot for that upload may not be created. This is rare but should be considered 
+  during active backup periods.
 
 **Example:**
 ```bash

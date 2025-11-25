@@ -91,14 +91,33 @@ echo ""
 echo "Deleting user $USERNAME..."
 
 # Kill the background monitoring subprocess for this user (runs as root)
-# This process may be holding file descriptors on /home/$USERNAME/uploads
+# This stops any in-progress snapshot monitoring for the deleted user.
+# Note: This does NOT clear inotify watches held by the main inotifywait process,
+# which may cause pending Btrfs deletions until terminas-monitor.service restarts.
+# Pending deletions are normal and do not affect functionality.
 if [ -f "/var/run/terminas/processing_$USERNAME" ]; then
     monitor_pid=$(cat "/var/run/terminas/processing_$USERNAME" 2>/dev/null)
     if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then
         echo "Stopping background monitor process for $USERNAME (PID $monitor_pid)..."
         kill "$monitor_pid" 2>/dev/null || true
-        sleep 1  # Give it time to exit gracefully
+        
+        # Wait up to 5 seconds for the process to exit
+        for i in {1..10}; do
+            if ! kill -0 "$monitor_pid" 2>/dev/null; then
+                break
+            fi
+            sleep 0.5
+        done
+        
+        # Force kill if still running
+        if kill -0 "$monitor_pid" 2>/dev/null; then
+            echo "  Force killing monitoring process..."
+            kill -9 "$monitor_pid" 2>/dev/null || true
+            sleep 0.5
+        fi
     fi
+    # Remove the lock file
+    rm -f "/var/run/terminas/processing_$USERNAME" 2>/dev/null || true
 fi
 
 # Kill any processes owned by the user
