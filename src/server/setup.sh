@@ -701,19 +701,19 @@ while read path event; do
             if [ -n "\$subvol_id" ]; then
                 qgroup_id="1/\$subvol_id"
                 
-                # Get quota usage (raw bytes) - use excl (exclusive/physical) not rfer (referenced/logical)
-                # excl accounts for CoW/deduplication, so shared blocks are only counted once
+                # Get quota usage (raw bytes) - use rfer (referenced/logical)
+                # With level-1 qgroup, this properly aggregates uploads + all assigned snapshots
                 qgroup_info=\$(btrfs qgroup show --raw /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
-                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$3}')
+                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$2}')
                 
                 # Get quota limit (need -re flag to show limit columns)
-                # Column 5 is max_excl (exclusive/physical limit)
+                # Column 4 is max_rfer (referenced data limit)
                 limit_info=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
-                limit_bytes=\$(echo "\$limit_info" | awk '{print \$5}')
+                limit_bytes=\$(echo "\$limit_info" | awk '{print \$4}')
                 
                 if [ -n "\$qgroup_info" ]; then
-                    # Parse: qgroupid rfer excl (from qgroup_info) - we use excl (physical)
-                    # And: qgroupid rfer excl max_rfer max_excl (from limit_info) - we use max_excl
+                    # Parse: qgroupid rfer excl (from qgroup_info) - we use rfer
+                    # And: qgroupid rfer excl max_rfer max_excl (from limit_info) - we use max_rfer
                     
                     # Check if limit is set
                     if [ "\$limit_bytes" != "0" ] && [ "\$limit_bytes" != "none" ] && [ -n "\$limit_bytes" ]; then
@@ -761,6 +761,23 @@ while read path event; do
         # 3. Make snapshot read-only for ransomware protection
         
         if btrfs subvolume snapshot "/home/\$user/uploads" "\$snapshot_path" >> "\$LOG" 2>&1; then
+            # Assign snapshot qgroup to user's tracking qgroup for quota enforcement
+            # Read the user's tracking qgroup ID (created by create_user.sh)
+            user_qgroup_file="/home/\$user/.terminas-qgroup"
+            if [ -f "\$user_qgroup_file" ]; then
+                tracking_qgroup=\$(cat "\$user_qgroup_file" 2>/dev/null)
+                if [ -n "\$tracking_qgroup" ]; then
+                    # Get the snapshot's subvolume ID
+                    snap_id=\$(btrfs subvolume show "\$snapshot_path" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
+                    if [ -n "\$snap_id" ]; then
+                        # Assign snapshot's qgroup (0/<snap_id>) to tracking qgroup
+                        if btrfs qgroup assign "0/\$snap_id" "\$tracking_qgroup" /home 2>/dev/null; then
+                            echo "\$(date '+%F %T') Assigned snapshot qgroup 0/\$snap_id to \$tracking_qgroup for quota tracking" >> "\$LOG"
+                        fi
+                    fi
+                fi
+            fi
+            
             # Snapshot created, now exclude in-progress files
             excluded_count=0
             

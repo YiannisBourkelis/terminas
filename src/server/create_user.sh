@@ -298,15 +298,22 @@ if [ "$QUOTA_GB" -gt 0 ]; then
             fi
             
             # Set quota limit (convert GB to bytes)
-            # Use exclusive (-e) limit for physical disk usage (deduped/CoW-aware)
-            # This counts actual disk blocks used, not logical file sizes
-            # Snapshots sharing blocks with uploads via CoW are counted once, not twice
+            # Use referenced (rfer) limit which tracks logical file sizes
+            # With level-1 qgroup, this properly tracks uploads + all snapshots
+            # Identical files in uploads and snapshots are counted once (deduped)
             QUOTA_BYTES=$((QUOTA_GB * 1024 * 1024 * 1024))
-            if btrfs qgroup limit -e "$QUOTA_BYTES" "$USER_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Set quota limit: ${QUOTA_GB}GB (physical/exclusive)"
+            if btrfs qgroup limit "$QUOTA_BYTES" "$USER_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Set quota limit: ${QUOTA_GB}GB"
             else
                 echo "  ⚠ WARNING: Failed to set quota limit"
             fi
+            
+            # Store the tracking qgroup ID for the monitor service to use
+            # This file is read by terminas-monitor.sh when assigning snapshot qgroups
+            echo "$USER_QGROUP" > "/home/$USERNAME/.terminas-qgroup"
+            chown root:root "/home/$USERNAME/.terminas-qgroup"
+            chmod 644 "/home/$USERNAME/.terminas-qgroup"
+            echo "  ✓ Saved qgroup ID for snapshot tracking"
         else
             echo "  ⚠ WARNING: Could not determine subvolume ID for quota setup"
         fi

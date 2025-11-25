@@ -362,11 +362,11 @@ fi
 # TEST 6: Try to exceed quota limit
 print_header "TEST 6/10: Test Quota Enforcement (File Upload Blocked)"
 
-# NOTE: Quota is enforced using EXCLUSIVE (physical) bytes, not REFERENCED (logical).
-# With Btrfs CoW, snapshots share blocks with uploads and add ~0 bytes to exclusive usage.
-# Only the uploads folder (and any modified/unique data) counts toward quota.
-# With 1GB limit and 300MB files, we need ~4 files in uploads to exceed the limit.
-# Quota enforcement happens on FILE UPLOADS, not snapshot creation.
+# NOTE: Quota is enforced using REFERENCED (logical) bytes on a level-1 qgroup.
+# The level-1 qgroup tracks uploads subvolume + all assigned snapshot subvolumes.
+# With Btrfs deduplication, identical data across uploads and snapshots is counted once.
+# A 300MB file in uploads = 300MB. After snapshot, still ~300MB (shared blocks).
+# With 1GB limit and 300MB files, we need ~4 unique files to exceed the limit.
 
 echo "Creating third test file (${TEST_FILE_SIZE_MB}MB)..."
 TEST_FILE_3="$TEST_FILES_DIR/test_file_3.dat"
