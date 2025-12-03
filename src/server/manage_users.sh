@@ -1167,24 +1167,36 @@ get_user_quota() {
         return 1
     fi
     
-    # Check for qgroup (level 1 qgroup: 1/<subvol_id>)
-    local qgroup_id="1/$subvol_id"
-    local qgroup_info=$(btrfs qgroup show --raw /home 2>/dev/null | grep "^${qgroup_id}\s" || echo "")
+    # First check for level-1 tracking qgroup (tracks uploads + all snapshots with exclusive bytes)
+    local qgroup_file="$home_dir/.terminas-qgroup"
+    local qgroup_id=""
     
-    if [ -z "$qgroup_info" ]; then
-        # Try level 0 qgroup as fallback
-        qgroup_id="0/$subvol_id"
-        qgroup_info=$(btrfs qgroup show --raw /home 2>/dev/null | grep "^${qgroup_id}\s" || echo "")
+    if [ -f "$qgroup_file" ]; then
+        qgroup_id=$(cat "$qgroup_file" 2>/dev/null)
     fi
+    
+    # Fall back to level-0 qgroup if no tracking qgroup exists
+    if [ -z "$qgroup_id" ]; then
+        qgroup_id="0/$subvol_id"
+    fi
+    
+    local qgroup_info=$(btrfs qgroup show --raw /home 2>/dev/null | grep "^${qgroup_id}\s" || echo "")
     
     if [ -z "$qgroup_info" ]; then
         return 1
     fi
     
     # Parse qgroup output for usage: qgroupid rfer excl
-    # Get the rfer (referenced bytes) column - this tracks logical file sizes
-    # With level-1 qgroup, this properly aggregates uploads + all assigned snapshots
-    local used_bytes=$(echo "$qgroup_info" | awk '{print $2}')
+    # For level-1 qgroups, use excl (exclusive/physical bytes) - column 3
+    # For level-0 qgroups, use rfer (referenced bytes) - column 2
+    local used_bytes
+    if [[ "$qgroup_id" == 1/* ]]; then
+        # Level-1 qgroup - use exclusive bytes (physical disk usage)
+        used_bytes=$(echo "$qgroup_info" | awk '{print $3}')
+    else
+        # Level-0 qgroup - use referenced bytes
+        used_bytes=$(echo "$qgroup_info" | awk '{print $2}')
+    fi
     
     # Get limit using btrfs qgroup show with limit columns
     # Format: qgroupid rfer excl max_rfer max_excl
@@ -1192,8 +1204,13 @@ get_user_quota() {
     local limit_bytes=""
     
     if [ -n "$limit_info" ]; then
-        # Column 4 is max_rfer (referenced data limit)
-        limit_bytes=$(echo "$limit_info" | awk '{print $4}')
+        if [[ "$qgroup_id" == 1/* ]]; then
+            # Level-1 qgroup - use max_excl (column 5)
+            limit_bytes=$(echo "$limit_info" | awk '{print $5}')
+        else
+            # Level-0 qgroup - use max_rfer (column 4)
+            limit_bytes=$(echo "$limit_info" | awk '{print $4}')
+        fi
     fi
     
     # Check if limit is set (0, none, or empty means unlimited)
@@ -1250,31 +1267,49 @@ set_quota_user() {
         return 1
     fi
     
-    # Create/use level 1 qgroup for tracking
-    local qgroup_id="1/$subvol_id"
+    # Check for existing level-1 tracking qgroup, or create one
+    local qgroup_file="$home_dir/.terminas-qgroup"
+    local qgroup_id=""
     
-    # Create qgroup if it doesn't exist
-    if ! btrfs qgroup show /home 2>/dev/null | grep -q "^${qgroup_id}\s"; then
-        if ! btrfs qgroup create "$qgroup_id" /home 2>/dev/null; then
-            echo "ERROR: Failed to create qgroup $qgroup_id"
-            return 1
-        fi
-        echo "Created qgroup: $qgroup_id"
+    if [ -f "$qgroup_file" ]; then
+        qgroup_id=$(cat "$qgroup_file" 2>/dev/null)
     fi
     
-    # Assign level 0 qgroup to level 1 if not already assigned
-    local level0_qgroup="0/$subvol_id"
-    if ! btrfs qgroup show /home 2>/dev/null | grep -q "$level0_qgroup.*$qgroup_id"; then
-        if btrfs qgroup assign "$level0_qgroup" "$qgroup_id" /home 2>/dev/null; then
-            echo "Assigned subvolume to qgroup"
+    # If no tracking qgroup exists, create one
+    if [ -z "$qgroup_id" ] || ! btrfs qgroup show /home 2>/dev/null | grep -q "^${qgroup_id}\s"; then
+        qgroup_id="1/$subvol_id"
+        
+        # Create the level-1 qgroup
+        if btrfs qgroup create "$qgroup_id" /home 2>/dev/null; then
+            echo "  Created tracking qgroup: $qgroup_id"
         fi
+        
+        # Assign uploads subvolume to tracking qgroup
+        if btrfs qgroup assign "0/$subvol_id" "$qgroup_id" /home 2>/dev/null; then
+            echo "  Assigned uploads to tracking qgroup"
+        fi
+        
+        # Assign all existing snapshots to tracking qgroup
+        for snapshot in "$home_dir/versions"/*; do
+            if [ -d "$snapshot" ]; then
+                local snap_id=$(btrfs subvolume show "$snapshot" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+                if [ -n "$snap_id" ]; then
+                    btrfs qgroup assign "0/$snap_id" "$qgroup_id" /home 2>/dev/null || true
+                fi
+            fi
+        done
+        
+        # Save the qgroup ID
+        echo "$qgroup_id" > "$qgroup_file"
+        chown root:root "$qgroup_file"
+        chmod 644 "$qgroup_file"
     fi
     
-    # Set quota limit (referenced/logical)
+    # Set exclusive quota limit on level-1 qgroup (tracks physical disk usage)
     local quota_bytes=$((quota_gb * 1024 * 1024 * 1024))
     
-    if btrfs qgroup limit "$quota_bytes" "$qgroup_id" /home 2>/dev/null; then
-        echo "✓ Set quota limit for user '$username': ${quota_gb}GB"
+    if btrfs qgroup limit -e "$quota_bytes" "$qgroup_id" /home 2>/dev/null; then
+        echo "✓ Set quota limit for user '$username': ${quota_gb}GB (exclusive/physical)"
         
         # Show current usage
         local quota_info=$(get_user_quota "$username")
@@ -1328,7 +1363,18 @@ remove_quota_user() {
         return 1
     fi
     
-    local qgroup_id="1/$subvol_id"
+    # Check for level-1 tracking qgroup first
+    local qgroup_file="$home_dir/.terminas-qgroup"
+    local qgroup_id=""
+    
+    if [ -f "$qgroup_file" ]; then
+        qgroup_id=$(cat "$qgroup_file" 2>/dev/null)
+    fi
+    
+    # Fall back to level-0 qgroup
+    if [ -z "$qgroup_id" ]; then
+        qgroup_id="0/$subvol_id"
+    fi
     
     # Check if qgroup exists
     if ! btrfs qgroup show /home 2>/dev/null | grep -q "^${qgroup_id}\s"; then

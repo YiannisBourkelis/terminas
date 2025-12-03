@@ -279,41 +279,41 @@ if [ "$QUOTA_GB" -gt 0 ]; then
         echo "  Run setup.sh to enable quotas, or manually: btrfs quota enable /home"
         echo "  Skipping quota setup"
     else
-        # Get the qgroup ID for the uploads subvolume (this is what actually holds data)
-        UPLOADS_QGROUP=$(btrfs subvolume show "/home/$USERNAME/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+        # Get the qgroup ID for the uploads subvolume
+        UPLOADS_SUBVOL_ID=$(btrfs subvolume show "/home/$USERNAME/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
         
-        if [ -n "$UPLOADS_QGROUP" ]; then
-            # Create level 1 qgroup for tracking (1/<subvol_id>)
-            # This will track the uploads subvolume + all snapshot subvolumes under versions/
-            USER_QGROUP="1/$UPLOADS_QGROUP"
+        if [ -n "$UPLOADS_SUBVOL_ID" ]; then
+            # Create a level-1 qgroup to track total disk usage (uploads + all snapshots)
+            # Using the uploads subvolume ID as the qgroup number for easy identification
+            # Level-1 qgroups with exclusive (excl) limits track actual physical disk usage
+            TRACKING_QGROUP="1/$UPLOADS_SUBVOL_ID"
             
-            # Create the qgroup
-            if btrfs qgroup create "$USER_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Created qgroup: $USER_QGROUP"
+            # Create the level-1 qgroup (ignore error if already exists)
+            if btrfs qgroup create "$TRACKING_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Created tracking qgroup: $TRACKING_QGROUP"
+            else
+                echo "  ✓ Using existing tracking qgroup: $TRACKING_QGROUP"
             fi
             
-            # Assign the uploads subvolume's qgroup (0/<subvol_id>) to our tracking qgroup
-            if btrfs qgroup assign "0/$UPLOADS_QGROUP" "$USER_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Assigned uploads subvolume to qgroup"
+            # Assign uploads subvolume (0/id) to the tracking qgroup (1/id)
+            if btrfs qgroup assign "0/$UPLOADS_SUBVOL_ID" "$TRACKING_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Assigned uploads qgroup to tracking qgroup"
             fi
             
-            # Set quota limit (convert GB to bytes)
-            # Use referenced (rfer) limit which tracks logical file sizes
-            # With level-1 qgroup, this properly tracks uploads + all snapshots
-            # Identical files in uploads and snapshots are counted once (deduped)
+            # Set exclusive quota limit on the level-1 qgroup
+            # This limits the total PHYSICAL disk usage (deduplicated) across uploads + all snapshots
+            # Writes will fail with "Disk quota exceeded" when physical usage exceeds limit
             QUOTA_BYTES=$((QUOTA_GB * 1024 * 1024 * 1024))
-            if btrfs qgroup limit "$QUOTA_BYTES" "$USER_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Set quota limit: ${QUOTA_GB}GB"
+            if btrfs qgroup limit -e "$QUOTA_BYTES" "$TRACKING_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Set exclusive quota limit: ${QUOTA_GB}GB on $TRACKING_QGROUP"
             else
                 echo "  ⚠ WARNING: Failed to set quota limit"
             fi
             
-            # Store the tracking qgroup ID for the monitor service to use
-            # This file is read by terminas-monitor.sh when assigning snapshot qgroups
-            echo "$USER_QGROUP" > "/home/$USERNAME/.terminas-qgroup"
+            # Store the tracking qgroup ID for the monitor to use when creating snapshots
+            echo "$TRACKING_QGROUP" > "/home/$USERNAME/.terminas-qgroup"
             chown root:root "/home/$USERNAME/.terminas-qgroup"
             chmod 644 "/home/$USERNAME/.terminas-qgroup"
-            echo "  ✓ Saved qgroup ID for snapshot tracking"
         else
             echo "  ⚠ WARNING: Could not determine subvolume ID for quota setup"
         fi

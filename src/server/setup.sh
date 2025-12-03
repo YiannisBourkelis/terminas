@@ -691,58 +691,55 @@ while read path event; do
         fi
         
         # Check quota before creating snapshot
-        # Note: Btrfs quotas are enforced at filesystem level, so even if we allow the
-        # snapshot here, Btrfs will reject it if it would exceed quota. This pre-check
-        # provides clearer logging for administrators.
+        # We use level-1 qgroup with exclusive (physical) bytes for accurate disk usage tracking
+        # This pre-check provides clearer logging for administrators.
         if btrfs qgroup show /home &>/dev/null; then
-            # Get subvolume ID for uploads subvolume and check quota
-            subvol_id=\$(btrfs subvolume show "/home/\$user/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
-            
-            if [ -n "\$subvol_id" ]; then
-                qgroup_id="1/\$subvol_id"
+            # Check if user has a tracking qgroup configured
+            user_qgroup_file="/home/\$user/.terminas-qgroup"
+            if [ -f "\$user_qgroup_file" ]; then
+                qgroup_id=\$(cat "\$user_qgroup_file" 2>/dev/null)
                 
-                # Get quota usage (raw bytes) - use rfer (referenced/logical)
-                # With level-1 qgroup, this properly aggregates uploads + all assigned snapshots
-                qgroup_info=\$(btrfs qgroup show --raw /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
-                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$2}')
-                
-                # Get quota limit (need -re flag to show limit columns)
-                # Column 4 is max_rfer (referenced data limit)
-                limit_info=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
-                limit_bytes=\$(echo "\$limit_info" | awk '{print \$4}')
-                
-                if [ -n "\$qgroup_info" ]; then
-                    # Parse: qgroupid rfer excl (from qgroup_info) - we use rfer
-                    # And: qgroupid rfer excl max_rfer max_excl (from limit_info) - we use max_rfer
+                if [ -n "\$qgroup_id" ]; then
+                    # Get quota usage (raw bytes) - use excl (exclusive/physical)
+                    # Column 3 is excl (exclusive bytes - actual physical disk usage)
+                    qgroup_info=\$(btrfs qgroup show --raw /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
+                    used_bytes=\$(echo "\$qgroup_info" | awk '{print \$3}')
                     
-                    # Check if limit is set
-                    if [ "\$limit_bytes" != "0" ] && [ "\$limit_bytes" != "none" ] && [ -n "\$limit_bytes" ]; then
-                        # Calculate available space
-                        available_bytes=\$((limit_bytes - used_bytes))
-                        
-                        # Reject snapshot if already at or over quota
-                        if [ "\$available_bytes" -le 0 ]; then
-                            # Over quota - reject snapshot
-                            used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
-                            limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
-                            echo "\$(date '+%F %T') ERROR: User \$user is at/over quota (\${used_gb}GB / \${limit_gb}GB)" >> "\$LOG"
-                            echo "\$(date '+%F %T') Snapshot creation blocked - user must free up space" >> "\$LOG"
-                            rm -f "\$processing_file" 2>/dev/null || true
-                            exit 0
-                        fi
-                        
-                        # Note: We cannot accurately predict snapshot size before creation due to
-                        # Btrfs Copy-on-Write. Snapshots initially share blocks with uploads subvolume
-                        # (minimal space), only diverging as files are modified. Btrfs will enforce
-                        # quota at filesystem level if snapshot would exceed limit.
-                        
-                        # Check warning threshold
-                        usage_pct=\$(echo "scale=1; (\$used_bytes / \$limit_bytes) * 100" | bc)
-                        if [ \$(echo "\$usage_pct > 90" | bc) -eq 1 ]; then
-                            used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
-                            limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
-                            available_gb=\$(echo "scale=2; \$available_bytes / 1024 / 1024 / 1024" | bc)
-                            echo "\$(date '+%F %T') WARNING: User \$user approaching quota limit (\${used_gb}GB / \${limit_gb}GB, \${usage_pct}%, \${available_gb}GB available)" >> "\$LOG"
+                    # Get quota limit (need -re flag to show limit columns)
+                    # Column 5 is max_excl (exclusive data limit)
+                    limit_info=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\${qgroup_id}\\s" || echo "")
+                    limit_bytes=\$(echo "\$limit_info" | awk '{print \$5}')
+                    
+                    if [ -n "\$used_bytes" ] && [ "\$used_bytes" != "0" ]; then
+                        # Check if limit is set
+                        if [ "\$limit_bytes" != "0" ] && [ "\$limit_bytes" != "none" ] && [ -n "\$limit_bytes" ]; then
+                            # Calculate available space
+                            available_bytes=\$((limit_bytes - used_bytes))
+                            
+                            # Reject snapshot if already at or over quota
+                            if [ "\$available_bytes" -le 0 ]; then
+                                # Over quota - reject snapshot
+                                used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
+                                limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
+                                echo "\$(date '+%F %T') ERROR: User \$user is at/over quota (\${used_gb}GB / \${limit_gb}GB exclusive)" >> "\$LOG"
+                                echo "\$(date '+%F %T') Snapshot creation blocked - user must free up space" >> "\$LOG"
+                                rm -f "\$processing_file" 2>/dev/null || true
+                                exit 0
+                            fi
+                            
+                            # Note: We cannot accurately predict snapshot size before creation due to
+                            # Btrfs Copy-on-Write. Snapshots initially share blocks with uploads subvolume
+                            # (minimal space), only diverging as files are modified. Btrfs will enforce
+                            # quota at filesystem level if snapshot would exceed limit.
+                            
+                            # Check warning threshold
+                            usage_pct=\$(echo "scale=1; (\$used_bytes / \$limit_bytes) * 100" | bc)
+                            if [ \$(echo "\$usage_pct > 90" | bc) -eq 1 ]; then
+                                used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
+                                limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
+                                available_gb=\$(echo "scale=2; \$available_bytes / 1024 / 1024 / 1024" | bc)
+                                echo "\$(date '+%F %T') WARNING: User \$user approaching quota limit (\${used_gb}GB / \${limit_gb}GB, \${usage_pct}%, \${available_gb}GB available)" >> "\$LOG"
+                            fi
                         fi
                     fi
                 fi
@@ -762,7 +759,7 @@ while read path event; do
         
         if btrfs subvolume snapshot "/home/\$user/uploads" "\$snapshot_path" >> "\$LOG" 2>&1; then
             # Assign snapshot qgroup to user's tracking qgroup for quota enforcement
-            # Read the user's tracking qgroup ID (created by create_user.sh)
+            # The tracking qgroup (level-1) aggregates uploads + all snapshots for total disk usage
             user_qgroup_file="/home/\$user/.terminas-qgroup"
             if [ -f "\$user_qgroup_file" ]; then
                 tracking_qgroup=\$(cat "\$user_qgroup_file" 2>/dev/null)
@@ -770,9 +767,9 @@ while read path event; do
                     # Get the snapshot's subvolume ID
                     snap_id=\$(btrfs subvolume show "\$snapshot_path" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
                     if [ -n "\$snap_id" ]; then
-                        # Assign snapshot's qgroup (0/<snap_id>) to tracking qgroup
+                        # Assign snapshot's qgroup (0/<snap_id>) to tracking qgroup (1/<id>)
                         if btrfs qgroup assign "0/\$snap_id" "\$tracking_qgroup" /home 2>/dev/null; then
-                            echo "\$(date '+%F %T') Assigned snapshot qgroup 0/\$snap_id to \$tracking_qgroup for quota tracking" >> "\$LOG"
+                            echo "\$(date '+%F %T') Assigned snapshot qgroup 0/\$snap_id to \$tracking_qgroup" >> "\$LOG"
                         fi
                     fi
                 fi

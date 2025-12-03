@@ -94,11 +94,6 @@ cleanup_test_user() {
         print_result "INFO" "Test user does not exist, nothing to cleanup"
     fi
     
-    # Remove any leftover runtime files (delete_user.sh also does this, but just to be sure)
-    rm -f "/var/run/terminas/activity_$TEST_USER" 2>/dev/null || true
-    rm -f "/var/run/terminas/snapshot_$TEST_USER" 2>/dev/null || true
-    rm -f "/var/run/terminas/processing_$TEST_USER" 2>/dev/null || true
-    
     echo ""
 }
 
@@ -362,11 +357,10 @@ fi
 # TEST 6: Try to exceed quota limit
 print_header "TEST 6/10: Test Quota Enforcement (File Upload Blocked)"
 
-# NOTE: Quota is enforced using REFERENCED (logical) bytes on a level-1 qgroup.
-# The level-1 qgroup tracks uploads subvolume + all assigned snapshot subvolumes.
-# With Btrfs deduplication, identical data across uploads and snapshots is counted once.
-# A 300MB file in uploads = 300MB. After snapshot, still ~300MB (shared blocks).
-# With 1GB limit and 300MB files, we need ~4 unique files to exceed the limit.
+# NOTE: Quota is enforced using EXCLUSIVE (physical) bytes on a level-1 qgroup.
+# The level-1 qgroup tracks uploads + all snapshots, measuring actual disk usage.
+# With Btrfs CoW, shared blocks between uploads and snapshots count only once.
+# With 1GB limit and 300MB unique files, the 4th file should push over the limit.
 
 echo "Creating third test file (${TEST_FILE_SIZE_MB}MB)..."
 TEST_FILE_3="$TEST_FILES_DIR/test_file_3.dat"
@@ -435,10 +429,10 @@ if [ -z "$QUOTA_BLOCKED_AT" ]; then
         # Get snapshot count after
         snapshot_count_after=$(find "/home/$TEST_USER/versions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
         
-        # With exclusive quota, snapshots are essentially free (share blocks via CoW)
-        # So snapshots should still be created even when near/at quota limit
+        # Snapshots are separate subvolumes and don't count toward uploads quota,
+        # so they should still be created even when uploads is at quota limit
         if [ "$snapshot_count_after" -gt "$snapshot_count_before" ]; then
-            print_result "PASS" "Snapshot created (expected - snapshots are free with exclusive quota)"
+            print_result "PASS" "Snapshot created (expected - snapshots don't count toward uploads quota)"
         else
             print_result "INFO" "No snapshot created (monitor may have blocked due to pre-check)"
         fi
