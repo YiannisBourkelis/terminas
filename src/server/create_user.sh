@@ -303,11 +303,23 @@ else
         fi
         
         # Assign uploads subvolume's level-0 qgroup to the user's level-1 qgroup
-        if btrfs qgroup assign "$UPLOADS_QGROUP" "$USER_QGROUP" /home 2>/dev/null; then
+        assign_output=$(btrfs qgroup assign "$UPLOADS_QGROUP" "$USER_QGROUP" /home 2>&1)
+        assign_exit=$?
+        if [ $assign_exit -eq 0 ]; then
             echo "  ✓ Assigned uploads subvolume ($UPLOADS_QGROUP) to user qgroup"
         else
-            echo "  ⚠ WARNING: Failed to assign uploads subvolume to user qgroup"
+            # Check if it's just "already a member" which is fine
+            if echo "$assign_output" | grep -qi "already"; then
+                echo "  ✓ Uploads subvolume already assigned to user qgroup"
+            else
+                echo "  ⚠ WARNING: Failed to assign uploads subvolume to user qgroup"
+                echo "    Error: $assign_output"
+            fi
         fi
+        
+        # Trigger quota rescan to ensure qgroup relationships are properly accounted
+        # Without this, the kernel may not recognize the hierarchical quota limits
+        btrfs quota rescan /home &>/dev/null || true
         
         # Set quota limit on the level-1 qgroup if quota is configured
         if [ "$QUOTA_GB" -gt 0 ]; then

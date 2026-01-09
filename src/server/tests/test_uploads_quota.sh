@@ -216,15 +216,59 @@ else
     exit 1
 fi
 
+# Wait for any quota rescan triggered by user creation to complete
+echo "Waiting for quota rescan to complete (if any)..."
+rescan_status=$(btrfs quota rescan -s /home 2>&1)
+if echo "$rescan_status" | grep -qi "running\|progress"; then
+    echo "  Quota rescan in progress, waiting..."
+    btrfs quota rescan -w /home 2>/dev/null || true
+    print_result "PASS" "Quota rescan completed"
+else
+    print_result "INFO" "No rescan in progress"
+fi
+
 # TEST 2: Upload 500MB file (should succeed)
 print_header "TEST 2/4: Upload 500MB File (Should Succeed)"
 
-# Debug: Show qgroup status before copy
-echo "Debug: Checking qgroup status..."
+# Debug: Show qgroup status before copy including parent relationships
+echo "Debug: Checking qgroup status and parent relationships..."
 if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
     user_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup")
     echo "  User qgroup: $user_qgroup"
-    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${user_qgroup}|qgroupid" | head -5
+    
+    # Show the level-1 qgroup with parent info (-p flag shows parent/child relationships)
+    echo "  Qgroup hierarchy (with -pc for parent/child):"
+    btrfs qgroup show -pc /home 2>/dev/null | head -3
+    btrfs qgroup show -pc /home 2>/dev/null | grep -E "${user_qgroup}|uploads" | head -10
+    
+    # Check if uploads is actually assigned
+    uploads_subvol_id=$(btrfs subvolume show "/home/$TEST_USER/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+    if [ -n "$uploads_subvol_id" ]; then
+        uploads_qgroup="0/$uploads_subvol_id"
+        echo "  Uploads qgroup: $uploads_qgroup"
+        
+        # Check parent assignment
+        parent_info=$(btrfs qgroup show -pc /home 2>/dev/null | grep "^${uploads_qgroup}\s" || echo "")
+        if [ -n "$parent_info" ]; then
+            parent=$(echo "$parent_info" | awk '{print $NF}')
+            if [ "$parent" = "$user_qgroup" ] || echo "$parent_info" | grep -q "$user_qgroup"; then
+                print_result "PASS" "Uploads qgroup correctly assigned to user qgroup"
+            else
+                print_result "FAIL" "Uploads qgroup NOT assigned to user qgroup!"
+                echo "  Expected parent: $user_qgroup"
+                echo "  Actual: $parent_info"
+                echo ""
+                echo "This is a critical issue - quota enforcement will hang."
+                echo "The btrfs qgroup assign command may have failed silently."
+                cleanup_test_user
+                exit 1
+            fi
+        else
+            print_result "FAIL" "Could not determine qgroup parent relationship"
+            cleanup_test_user
+            exit 1
+        fi
+    fi
 fi
 
 # Check if quota rescan is in progress (can cause slowdowns)
