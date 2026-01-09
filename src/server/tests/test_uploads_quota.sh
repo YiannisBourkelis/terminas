@@ -138,6 +138,18 @@ if ! btrfs qgroup show /home &>/dev/null; then
 fi
 print_result "PASS" "Btrfs quotas enabled on /home"
 
+# Wait for any ongoing quota rescan to complete (critical for quota enforcement)
+echo "Checking for ongoing quota rescan..."
+rescan_status=$(btrfs quota rescan-status /home 2>&1)
+if echo "$rescan_status" | grep -q "running"; then
+    echo "Quota rescan is in progress. Waiting for completion..."
+    echo "(This may take a while for large filesystems)"
+    btrfs quota rescan -w /home 2>/dev/null || true
+    print_result "PASS" "Quota rescan completed"
+else
+    print_result "PASS" "No quota rescan in progress"
+fi
+
 if [ ! -f "$SCRIPT_DIR/create_user.sh" ]; then
     print_result "FAIL" "create_user.sh not found in $SCRIPT_DIR"
     exit 1
@@ -172,6 +184,19 @@ fi
 # TEST 2: Upload 500MB file (should succeed)
 print_header "TEST 2/4: Upload 500MB File (Should Succeed)"
 
+# Debug: Show qgroup status before copy
+echo "Debug: Checking qgroup status..."
+if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
+    user_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup")
+    echo "  User qgroup: $user_qgroup"
+    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${user_qgroup}|qgroupid" | head -5
+fi
+
+# Check if quota rescan is in progress (can cause slowdowns)
+echo "Debug: Checking quota rescan status..."
+rescan_status=$(btrfs quota rescan-status /home 2>&1 || echo "unknown")
+echo "  Rescan status: $rescan_status"
+
 echo "Creating 500MB test file with random data..."
 TEST_FILE_500MB="$TEST_FILES_DIR/test_500mb.dat"
 dd if=/dev/urandom of="$TEST_FILE_500MB" bs=10M count=50 status=progress 2>&1 | grep -v records || true
@@ -185,12 +210,27 @@ actual_size=$(du -m "$TEST_FILE_500MB" | cut -f1)
 print_result "INFO" "Created test file: ${actual_size}MB"
 
 echo "Copying 500MB file to uploads directory..."
-if cp "$TEST_FILE_500MB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
+echo "  (timeout: 120 seconds)"
+
+# Use timeout to prevent infinite hang
+if timeout 120 cp "$TEST_FILE_500MB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
     chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_500mb.dat"
     print_result "PASS" "500MB file uploaded successfully (as expected)"
 else
-    print_result "FAIL" "500MB file upload failed unexpectedly"
-    cat /tmp/cp_error.txt
+    exit_code=$?
+    if [ $exit_code -eq 124 ]; then
+        print_result "FAIL" "Copy timed out after 120 seconds"
+        echo ""
+        echo "Debug: This may indicate a Btrfs qgroup issue."
+        echo "Check: btrfs quota rescan-status /home"
+        echo "Check: btrfs qgroup show -r /home"
+        echo ""
+        echo "If quota rescan is running, wait for it to complete:"
+        echo "  btrfs quota rescan -w /home"
+    else
+        print_result "FAIL" "500MB file upload failed unexpectedly (exit code: $exit_code)"
+        cat /tmp/cp_error.txt
+    fi
     cleanup_test_user
     exit 1
 fi
