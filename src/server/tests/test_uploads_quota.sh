@@ -205,7 +205,8 @@ fi
 
 # Verify quota is set
 echo "Verifying quota configuration..."
-if "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" 2>&1 | grep -q "Quota limit: ${TEST_QUOTA_GB}"; then
+# The show-quota output format is "Limit: X.XXGB" under "Total Quota" section
+if "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" 2>&1 | grep -q "Limit: ${TEST_QUOTA_GB}"; then
     print_result "PASS" "Quota limit correctly set to ${TEST_QUOTA_GB}GB"
 else
     print_result "FAIL" "Quota limit not set correctly"
