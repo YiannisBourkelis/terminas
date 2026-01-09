@@ -1148,9 +1148,9 @@ disable_timemachine() {
 }
 
 # Get quota information for a user
-# Returns: used_bytes|limit_bytes|qgroup_id or empty if no quota
-# Uses level-1 qgroup (1/UID) which contains uploads subvolume + all snapshots
-# See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+# Returns: used_bytes|limit_bytes|qgroup_id|total_bytes|is_blocked
+# Uses level-0 qgroup on uploads subvolume for fast quota enforcement
+# Hybrid mode: calculates total usage (uploads + snapshots) separately
 get_user_quota() {
     local username="$1"
     local home_dir="/home/$username"
@@ -1160,39 +1160,39 @@ get_user_quota() {
         return 1
     fi
     
-    # Read user's level-1 qgroup from config file (created by create_user.sh)
-    local user_qgroup=""
+    # Read user's uploads qgroup from config file (created by create_user.sh)
+    local uploads_qgroup=""
     if [ -f "$home_dir/.terminas-qgroup" ]; then
-        user_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
+        uploads_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
     fi
     
-    # Fallback: try to construct qgroup from UID if config file doesn't exist
-    if [ -z "$user_qgroup" ]; then
-        local user_uid=$(id -u "$username" 2>/dev/null || echo "")
-        if [ -n "$user_uid" ]; then
-            user_qgroup="1/$user_uid"
+    # Fallback: try to determine qgroup from uploads subvolume
+    if [ -z "$uploads_qgroup" ] || [[ "$uploads_qgroup" == 1/* ]]; then
+        # Old format was level-1 qgroup (1/UID), need to look up level-0
+        if [ -d "$home_dir/uploads" ]; then
+            local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+            if [ -n "$uploads_subvol_id" ]; then
+                uploads_qgroup="0/$uploads_subvol_id"
+            fi
         fi
     fi
     
-    if [ -z "$user_qgroup" ]; then
+    if [ -z "$uploads_qgroup" ]; then
         return 1
     fi
     
-    # Get usage from level-1 qgroup
-    # For level-1 qgroups, column 2 is rfer (referenced bytes - total data from all contained subvolumes)
-    local qgroup_info=$(btrfs qgroup show --raw /home 2>/dev/null | grep "^${user_qgroup}\s" || echo "")
+    # Get usage from uploads subvolume (level-0 qgroup)
+    local qgroup_info=$(btrfs qgroup show --raw /home 2>/dev/null | grep "^${uploads_qgroup}\s" || echo "")
     
     if [ -z "$qgroup_info" ]; then
         return 1
     fi
     
-    # Use referenced bytes (column 2) for level-1 qgroups
-    # This is the total data reachable from all subvolumes in the group
+    # Use referenced bytes (column 2)
     local used_bytes=$(echo "$qgroup_info" | awk '{print $2}')
     
-    # Get limit from level-1 qgroup
-    # Column 4 is max_rfer (referenced limit) when using -r flag
-    local limit_info=$(btrfs qgroup show --raw -r /home 2>/dev/null | grep "^${user_qgroup}\s" || echo "")
+    # Get limit from uploads qgroup
+    local limit_info=$(btrfs qgroup show --raw -r /home 2>/dev/null | grep "^${uploads_qgroup}\s" || echo "")
     local limit_bytes=""
     
     if [ -n "$limit_info" ]; then
@@ -1205,8 +1205,29 @@ get_user_quota() {
         limit_bytes="0"
     fi
     
-    # Return: used_bytes|limit_bytes|qgroup_id
-    echo "${used_bytes}|${limit_bytes}|${user_qgroup}"
+    # Calculate total usage including snapshots (for hybrid quota display)
+    local total_bytes="$used_bytes"
+    if [ -d "$home_dir/versions" ]; then
+        for snap in "$home_dir/versions"/*; do
+            if [ -d "$snap" ]; then
+                local snap_subvol_id=$(btrfs subvolume show "$snap" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+                if [ -n "$snap_subvol_id" ]; then
+                    local snap_qgroup="0/$snap_subvol_id"
+                    local snap_excl=$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^${snap_qgroup}\s" | awk '{print $2}' || echo "0")
+                    total_bytes=$((total_bytes + snap_excl))
+                fi
+            fi
+        done
+    fi
+    
+    # Check if uploads are blocked (quota exceeded flag)
+    local is_blocked="0"
+    if [ -f "$home_dir/.terminas-quota-exceeded" ]; then
+        is_blocked="1"
+    fi
+    
+    # Return: used_bytes|limit_bytes|qgroup_id|total_bytes|is_blocked
+    echo "${used_bytes}|${limit_bytes}|${uploads_qgroup}|${total_bytes}|${is_blocked}"
     return 0
 }
 
@@ -1246,55 +1267,54 @@ set_quota_user() {
     
     local home_dir="/home/$username"
     
-    # Read user's level-1 qgroup from config file (created by create_user.sh)
-    local user_qgroup=""
-    if [ -f "$home_dir/.terminas-qgroup" ]; then
-        user_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
-    fi
-    
-    # Fallback: try to construct qgroup from UID if config file doesn't exist
-    if [ -z "$user_qgroup" ]; then
-        local user_uid=$(id -u "$username" 2>/dev/null || echo "")
-        if [ -n "$user_uid" ]; then
-            user_qgroup="1/$user_uid"
-            # Check if this qgroup exists
-            if ! btrfs qgroup show /home 2>/dev/null | grep -q "^${user_qgroup}\s"; then
-                echo "ERROR: User's qgroup ($user_qgroup) does not exist"
-                echo "Re-create the user with: ./delete_user.sh $username && ./create_user.sh $username --quota $quota_gb"
-                return 1
-            fi
+    # Get uploads subvolume qgroup
+    local uploads_qgroup=""
+    if [ -d "$home_dir/uploads" ]; then
+        local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+        if [ -n "$uploads_subvol_id" ]; then
+            uploads_qgroup="0/$uploads_subvol_id"
         fi
     fi
     
-    if [ -z "$user_qgroup" ]; then
-        echo "ERROR: Could not determine user's qgroup"
+    if [ -z "$uploads_qgroup" ]; then
+        echo "ERROR: Could not determine uploads subvolume qgroup"
+        echo "Ensure /home/$username/uploads exists and is a Btrfs subvolume"
         return 1
     fi
     
-    # Set quota on level-1 qgroup (user's qgroup containing uploads + snapshots)
-    # This properly accounts for all user data per Btrfs qgroup documentation
-    # See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+    # Set quota on uploads subvolume (fast, reliable)
     local quota_bytes=$((quota_gb * 1024 * 1024 * 1024))
     
-    if btrfs qgroup limit "$quota_bytes" "$user_qgroup" /home 2>/dev/null; then
-        echo "✓ Set quota limit for user '$username': ${quota_gb}GB on qgroup $user_qgroup"
+    if btrfs qgroup limit "$quota_bytes" "$uploads_qgroup" /home 2>/dev/null; then
+        echo "✓ Set quota limit for user '$username': ${quota_gb}GB on uploads ($uploads_qgroup)"
     else
-        echo "ERROR: Failed to set quota limit on user qgroup"
+        echo "ERROR: Failed to set quota limit on uploads subvolume"
         return 1
     fi
     
     # Update stored qgroup reference
-    echo "$user_qgroup" > "$home_dir/.terminas-qgroup"
+    echo "$uploads_qgroup" > "$home_dir/.terminas-qgroup"
     chown root:root "$home_dir/.terminas-qgroup"
     chmod 644 "$home_dir/.terminas-qgroup"
+    
+    # Update stored quota limit (for hybrid quota checking)
+    echo "$quota_gb" > "$home_dir/.terminas-quota-limit"
+    chown root:root "$home_dir/.terminas-quota-limit"
+    chmod 644 "$home_dir/.terminas-quota-limit"
+    
+    # Clear any quota exceeded flag
+    rm -f "$home_dir/.terminas-quota-exceeded" 2>/dev/null || true
     
     # Show current usage
     local quota_info=$(get_user_quota "$username")
     if [ -n "$quota_info" ]; then
         local used_bytes=$(echo "$quota_info" | cut -d'|' -f1)
-        local used_gb=$(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc)
-        local usage_pct=$(echo "scale=1; ($used_bytes / $quota_bytes) * 100" | bc)
-        echo "  Current usage: ${used_gb}GB (${usage_pct}%)"
+        local total_bytes=$(echo "$quota_info" | cut -d'|' -f4)
+        local used_gb=$(printf "%.2f" $(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        local total_gb=$(printf "%.2f" $(echo "scale=2; $total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        local usage_pct=$(printf "%.1f" $(echo "scale=1; ($total_bytes / $quota_bytes) * 100" | bc 2>/dev/null || echo "0"))
+        echo "  Uploads usage: ${used_gb}GB"
+        echo "  Total usage (uploads + snapshots): ${total_gb}GB (${usage_pct}%)"
     fi
 }
 
@@ -1327,32 +1347,39 @@ remove_quota_user() {
     
     local home_dir="/home/$username"
     
-    # Read user's level-1 qgroup from config file (created by create_user.sh)
-    local user_qgroup=""
+    # Get uploads subvolume qgroup
+    local uploads_qgroup=""
     if [ -f "$home_dir/.terminas-qgroup" ]; then
-        user_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
+        uploads_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
     fi
     
-    # Fallback: try to construct qgroup from UID if config file doesn't exist
-    if [ -z "$user_qgroup" ]; then
-        local user_uid=$(id -u "$username" 2>/dev/null || echo "")
-        if [ -n "$user_uid" ]; then
-            user_qgroup="1/$user_uid"
+    # Fallback: determine from uploads subvolume
+    if [ -z "$uploads_qgroup" ] || [[ "$uploads_qgroup" == 1/* ]]; then
+        if [ -d "$home_dir/uploads" ]; then
+            local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+            if [ -n "$uploads_subvol_id" ]; then
+                uploads_qgroup="0/$uploads_subvol_id"
+            fi
         fi
     fi
     
-    if [ -z "$user_qgroup" ]; then
-        echo "ERROR: Could not determine user's qgroup"
+    if [ -z "$uploads_qgroup" ]; then
+        echo "ERROR: Could not determine uploads subvolume qgroup"
         return 1
     fi
     
-    # Remove quota from level-1 qgroup (user's qgroup)
-    if btrfs qgroup limit none "$user_qgroup" /home 2>/dev/null; then
+    # Remove quota from uploads subvolume
+    if btrfs qgroup limit none "$uploads_qgroup" /home 2>/dev/null; then
         echo "✓ Removed quota limit for user '$username' (unlimited storage)"
     else
         echo "ERROR: Failed to remove quota limit"
         return 1
     fi
+    
+    # Update config files
+    echo "$uploads_qgroup" > "$home_dir/.terminas-qgroup"
+    echo "0" > "$home_dir/.terminas-quota-limit"
+    rm -f "$home_dir/.terminas-quota-exceeded" 2>/dev/null || true
 }
 
 # Show quota usage and limit for a user
@@ -1403,34 +1430,68 @@ show_quota_user() {
         local used_bytes=$(echo "$quota_info" | cut -d'|' -f1)
         local limit_bytes=$(echo "$quota_info" | cut -d'|' -f2)
         local qgroup_id=$(echo "$quota_info" | cut -d'|' -f3)
+        local total_bytes=$(echo "$quota_info" | cut -d'|' -f4)
+        local is_blocked=$(echo "$quota_info" | cut -d'|' -f5)
         
         # Ensure values are numeric for calculations
         used_bytes=${used_bytes:-0}
         limit_bytes=${limit_bytes:-0}
+        total_bytes=${total_bytes:-0}
         
         # Validate numeric values
         [[ ! "$used_bytes" =~ ^[0-9]+$ ]] && used_bytes=0
         [[ ! "$limit_bytes" =~ ^[0-9]+$ ]] && limit_bytes=0
+        [[ ! "$total_bytes" =~ ^[0-9]+$ ]] && total_bytes=0
         
-        # Format bytes to GB with proper leading zeros (bc can output .XX instead of 0.XX)
+        # Get configured quota limit from file (for hybrid display)
+        local home_dir="/home/$username"
+        local quota_limit_gb="0"
+        if [ -f "$home_dir/.terminas-quota-limit" ]; then
+            quota_limit_gb=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
+        fi
+        
+        # Format bytes to GB
         local used_gb=$(printf "%.2f" $(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        local total_gb=$(printf "%.2f" $(echo "scale=2; $total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
         
-        if [ "$limit_bytes" = "0" ]; then
+        if [ "$limit_bytes" = "0" ] && [ "$quota_limit_gb" = "0" ]; then
             echo "Quota: Unlimited"
-            echo "Current usage: ${used_gb}GB"
+            echo "Uploads usage: ${used_gb}GB"
+            echo "Total usage (uploads + snapshots): ${total_gb}GB"
         else
             local limit_gb=$(printf "%.2f" $(echo "scale=2; $limit_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
-            local usage_pct=$(printf "%.1f" $(echo "scale=1; ($used_bytes / $limit_bytes) * 100" | bc 2>/dev/null || echo "0"))
-            local available_bytes=$((limit_bytes - used_bytes))
-            local available_gb=$(printf "%.2f" $(echo "scale=2; $available_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
             
-            echo "Quota limit: ${limit_gb}GB"
-            echo "Current usage: ${used_gb}GB (${usage_pct}% used, ${available_gb}GB available)"
+            # Show uploads quota status
+            echo "Uploads Quota:"
+            echo "  Limit: ${limit_gb}GB"
+            echo "  Usage: ${used_gb}GB"
             
-            # Warning if over threshold (only if usage_pct is a valid number)
-            if [[ "$usage_pct" =~ ^[0-9]+\.?[0-9]*$ ]] && [ $(echo "$usage_pct > 90" | bc 2>/dev/null || echo 0) -eq 1 ]; then
+            # Show total quota status (hybrid)
+            if [ "$quota_limit_gb" != "0" ]; then
+                local quota_limit_bytes=$((quota_limit_gb * 1024 * 1024 * 1024))
+                local total_pct=$(printf "%.1f" $(echo "scale=1; ($total_bytes / $quota_limit_bytes) * 100" | bc 2>/dev/null || echo "0"))
+                local total_available=$((quota_limit_bytes - total_bytes))
+                local total_available_gb=$(printf "%.2f" $(echo "scale=2; $total_available / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+                
                 echo ""
-                echo "⚠ WARNING: Storage usage is above 90%"
+                echo "Total Quota (uploads + snapshots):"
+                echo "  Limit: ${quota_limit_gb}GB"
+                echo "  Usage: ${total_gb}GB (${total_pct}%)"
+                
+                if [ "$total_available" -gt 0 ]; then
+                    echo "  Available: ${total_available_gb}GB"
+                fi
+                
+                # Show warning/blocked status
+                if [ "$is_blocked" = "1" ]; then
+                    echo ""
+                    echo "⛔ UPLOADS BLOCKED: Total usage exceeds quota limit!"
+                    echo "   User must delete files from uploads folder to get under quota."
+                    echo "   After next snapshot, uploads will be re-enabled automatically."
+                elif [[ "$total_pct" =~ ^[0-9]+\.?[0-9]*$ ]] && [ $(echo "$total_pct > 90" | bc 2>/dev/null || echo 0) -eq 1 ]; then
+                    echo ""
+                    echo "⚠ WARNING: Total storage usage is above 90%"
+                fi
             fi
         fi
         

@@ -157,23 +157,33 @@ Reference documentation for key technologies used in this project:
 - **Ownership**: root:backupusers with 755 (readable by user, immutable)
 
 ### Btrfs Quota Architecture
-Per-user storage quotas use hierarchical qgroups per the Btrfs documentation:
+Per-user storage quotas use a hybrid approach for reliable quota enforcement:
 
-**Level-1 Qgroup (1/UID)**: Container qgroup for each user
-- Created when user is created (`create_user.sh`)
-- Quota limit is set on this level-1 qgroup
+**Level-0 Qgroup (0/SUBVOL_ID)**: Direct quota on uploads subvolume
+- Created automatically when subvolume is created
+- Quota limit is set directly on uploads subvolume for fast enforcement
 - Stored in `/home/<username>/.terminas-qgroup`
 
-**Level-0 Qgroups (0/SUBVOL_ID)**: Automatic qgroups for each subvolume
-- Uploads subvolume: Assigned to user's level-1 qgroup at creation
-- Snapshot subvolumes: Assigned to user's level-1 qgroup when created by monitor
+**Hybrid Quota Check**: Total usage monitoring after each snapshot
+- After each snapshot, calculates: uploads_size + all_snapshots_size
+- If total > user quota limit, uploads are blocked (subvolume limit set to 1 byte)
+- User can still delete files from uploads
+- Quota is re-checked when:
+  1. User deletes a file from uploads (immediate, via inotify delete event)
+  2. During daily retention cleanup (catches any missed cases)
+- Flag file: `/home/<username>/.terminas-quota-exceeded`
 
-**Quota Enforcement**:
-- Limit is set on level-1 qgroup using `btrfs qgroup limit <bytes> 1/<UID> /home`
-- Btrfs automatically enforces the limit across ALL contained subvolumes
-- "Disk quota exceeded" error when user exceeds their quota
+**Why Not Level-1 Qgroups?**
+- Btrfs level-1 hierarchical qgroups with limits cause severe write performance issues
+- Kernel can hang during quota accounting with multiple subvolumes
+- Level-0 on uploads is fast and reliable
 
-**Reference**: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+**Configuration Files**:
+- `.terminas-qgroup`: Uploads subvolume qgroup ID (e.g., "0/1234")
+- `.terminas-quota-limit`: Configured quota limit in GB
+- `.terminas-quota-exceeded`: Flag file when over total quota
+
+**Reference**: https://btrfs.readthedocs.io/en/latest/Qgroups.html
 
 ### Retention Policy
 **Grandfather-Father-Son (default)**:

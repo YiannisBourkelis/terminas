@@ -8,13 +8,10 @@
 # (should succeed), then tries to upload a 1GB file (should fail with
 # "Disk quota exceeded").
 #
-# Quota Architecture (per Btrfs qgroup documentation):
-# - Level-1 qgroup (1/$UID) is created for each user
-# - The uploads subvolume's level-0 qgroup is assigned as a child
-# - All snapshot level-0 qgroups are assigned as children when created
-# - Quota limit is set on the level-1 qgroup, which enforces limits
-#   across ALL user data: uploads + all snapshots
-# See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+# Quota Architecture:
+# - Level-0 qgroup on uploads subvolume for fast quota enforcement
+# - Hybrid mode: total usage (uploads + snapshots) checked after each snapshot
+# - If over total quota, uploads are blocked until user deletes files
 #
 # Copyright (c) 2025 Yianni Bourkelis
 # Licensed under the MIT License - see LICENSE file for details
@@ -230,51 +227,23 @@ fi
 # TEST 2: Upload 500MB file (should succeed)
 print_header "TEST 2/4: Upload 500MB File (Should Succeed)"
 
-# Debug: Show qgroup status before copy including parent relationships
-echo "Debug: Checking qgroup status and parent relationships..."
+# Debug: Show qgroup status before copy
+echo "Debug: Checking qgroup status..."
 if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
-    user_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup")
-    echo "  User qgroup: $user_qgroup"
+    uploads_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup")
+    echo "  Uploads qgroup: $uploads_qgroup"
     
-    # Show the level-1 qgroup with parent info (-p flag shows parent/child relationships)
-    echo "  Qgroup hierarchy (with -pc for parent/child):"
-    btrfs qgroup show -pc /home 2>/dev/null | head -3
-    btrfs qgroup show -pc /home 2>/dev/null | grep -E "${user_qgroup}|uploads" | head -10
+    # Show quota info for this qgroup
+    echo "  Quota info:"
+    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${uploads_qgroup}\s|Qgroupid" | head -5
     
-    # Check if uploads is actually assigned
-    uploads_subvol_id=$(btrfs subvolume show "/home/$TEST_USER/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
-    if [ -n "$uploads_subvol_id" ]; then
-        uploads_qgroup="0/$uploads_subvol_id"
-        echo "  Uploads qgroup: $uploads_qgroup"
-        
-        # Check parent assignment
-        parent_info=$(btrfs qgroup show -pc /home 2>/dev/null | grep "^${uploads_qgroup}\s" || echo "")
-        if [ -n "$parent_info" ]; then
-            parent=$(echo "$parent_info" | awk '{print $NF}')
-            if [ "$parent" = "$user_qgroup" ] || echo "$parent_info" | grep -q "$user_qgroup"; then
-                print_result "PASS" "Uploads qgroup correctly assigned to user qgroup"
-            else
-                print_result "FAIL" "Uploads qgroup NOT assigned to user qgroup!"
-                echo "  Expected parent: $user_qgroup"
-                echo "  Actual: $parent_info"
-                echo ""
-                echo "This is a critical issue - quota enforcement will hang."
-                echo "The btrfs qgroup assign command may have failed silently."
-                cleanup_test_user
-                exit 1
-            fi
-        else
-            print_result "FAIL" "Could not determine qgroup parent relationship"
-            cleanup_test_user
-            exit 1
-        fi
+    # Verify this is a level-0 qgroup (should be 0/xxx format)
+    if [[ "$uploads_qgroup" == 0/* ]]; then
+        print_result "PASS" "Using level-0 qgroup on uploads subvolume (fast mode)"
+    else
+        print_result "INFO" "Qgroup format: $uploads_qgroup"
     fi
 fi
-
-# Check if quota rescan is in progress (can cause slowdowns)
-echo "Debug: Checking quota rescan status..."
-rescan_status=$(btrfs quota rescan -s /home 2>&1 || echo "unknown")
-echo "  Rescan status: $rescan_status"
 
 echo "Creating 500MB test file with random data..."
 TEST_FILE_500MB="$TEST_FILES_DIR/test_500mb.dat"
@@ -289,16 +258,15 @@ actual_size=$(du -m "$TEST_FILE_500MB" | cut -f1)
 print_result "INFO" "Created test file: ${actual_size}MB"
 
 echo "Copying 500MB file to uploads directory..."
-echo "  (timeout: 120 seconds)"
 
-# Use timeout to prevent infinite hang
-if timeout 120 cp "$TEST_FILE_500MB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
+# Use timeout (should be fast with level-0 quotas, but protect against edge cases)
+if timeout 30 cp "$TEST_FILE_500MB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
     chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_500mb.dat"
     print_result "PASS" "500MB file uploaded successfully (as expected)"
 else
     exit_code=$?
     if [ $exit_code -eq 124 ]; then
-        print_result "FAIL" "Copy timed out after 120 seconds"
+        print_result "FAIL" "Copy timed out after 30 seconds"
         echo ""
         echo "Debug: This may indicate a Btrfs qgroup issue."
         echo "Check: btrfs quota rescan -s /home"
@@ -355,26 +323,24 @@ if cp "$TEST_FILE_1GB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
     echo ""
     echo "Qgroup details (raw):"
     
-    # Read user's level-1 qgroup from config file
-    user_qgroup=""
+    # Read uploads qgroup from config file
+    uploads_qgroup=""
     if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
-        user_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup" 2>/dev/null)
+        uploads_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup" 2>/dev/null)
     fi
-    echo "User qgroup (from config): $user_qgroup"
+    echo "Uploads qgroup (from config): $uploads_qgroup"
     
     uploads_subvol_id=$(btrfs subvolume show "/home/$TEST_USER/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "unknown")
     echo "Uploads subvolume ID: $uploads_subvol_id"
     
     echo ""
-    echo "Level-1 qgroup (user quota container):"
+    echo "Uploads qgroup (level-0 quota):"
     btrfs qgroup show -r /home 2>/dev/null | head -1
-    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${user_qgroup}" || echo "  (not found)"
+    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${uploads_qgroup}|^0/${uploads_subvol_id}" || echo "  (not found)"
     
     echo ""
-    echo "Level-0 qgroups (subvolumes):"
-    btrfs qgroup show /home 2>/dev/null | grep -E "0/$uploads_subvol_id" || echo "  (uploads qgroup not found)"
-    echo ""
-    echo "Note: Quota is enforced on the level-1 qgroup (1/UID) which contains uploads + all snapshots"
+    echo "Note: Quota is enforced on the uploads subvolume (level-0 qgroup) for fast enforcement"
+    echo "      Hybrid mode checks total usage (uploads + snapshots) after each snapshot"
     
     TEST_RESULT="FAIL"
 else

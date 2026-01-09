@@ -3,12 +3,11 @@
 # test_quota.sh - Test script for termiNAS quota functionality
 # Usage: ./test_quota.sh [--cleanup-only]
 #
-# This comprehensive test verifies the level-1 qgroup quota architecture:
-# - Level-1 qgroup (1/$UID) is created for each user
-# - Uploads subvolume is assigned to the user's level-1 qgroup
-# - Snapshots are assigned to the user's level-1 qgroup when created
-# - Quota limit is enforced across all user data (uploads + snapshots)
-# See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+# This comprehensive test verifies the hybrid quota architecture:
+# - Level-0 qgroup on uploads subvolume for fast quota enforcement
+# - Quota limit set directly on uploads subvolume
+# - Hybrid mode: total usage (uploads + snapshots) checked after each snapshot
+# - If over total quota, uploads are blocked until user deletes files
 #
 # Copyright (c) 2025 Yianni Bourkelis
 # Licensed under the MIT License - see LICENSE file for details
@@ -210,36 +209,38 @@ else
     exit 1
 fi
 
-# Verify level-1 qgroup hierarchy structure
-echo "Verifying level-1 qgroup hierarchy..."
+# Verify uploads qgroup structure
+echo "Verifying uploads qgroup configuration..."
 
 # Check that .terminas-qgroup file exists
 if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
-    USER_QGROUP=$(cat "/home/$TEST_USER/.terminas-qgroup")
-    print_result "PASS" "User qgroup config exists: $USER_QGROUP"
+    UPLOADS_QGROUP=$(cat "/home/$TEST_USER/.terminas-qgroup")
+    print_result "PASS" "Uploads qgroup config exists: $UPLOADS_QGROUP"
+    
+    # Verify this is a level-0 qgroup (0/xxx format)
+    if [[ "$UPLOADS_QGROUP" == 0/* ]]; then
+        print_result "PASS" "Using level-0 qgroup on uploads subvolume (fast mode)"
+    else
+        print_result "INFO" "Qgroup format: $UPLOADS_QGROUP (expected 0/xxx)"
+    fi
     
     # Verify the qgroup exists in Btrfs
-    if btrfs qgroup show /home 2>/dev/null | grep -q "^${USER_QGROUP}\s"; then
-        print_result "PASS" "Level-1 qgroup exists in Btrfs"
+    if btrfs qgroup show /home 2>/dev/null | grep -q "^${UPLOADS_QGROUP}\s"; then
+        print_result "PASS" "Uploads qgroup exists in Btrfs"
     else
-        print_result "FAIL" "Level-1 qgroup not found in Btrfs"
+        print_result "FAIL" "Uploads qgroup not found in Btrfs"
         btrfs qgroup show /home 2>/dev/null | head -10
     fi
     
-    # Verify uploads subvolume is assigned to user qgroup
-    UPLOADS_SUBVOL_ID=$(btrfs subvolume show "/home/$TEST_USER/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
-    if [ -n "$UPLOADS_SUBVOL_ID" ]; then
-        UPLOADS_QGROUP="0/$UPLOADS_SUBVOL_ID"
-        # Check parent-child relationship
-        if btrfs qgroup show /home 2>/dev/null | grep -q "$UPLOADS_QGROUP.*$USER_QGROUP\|$USER_QGROUP.*$UPLOADS_QGROUP"; then
-            print_result "PASS" "Uploads qgroup ($UPLOADS_QGROUP) is in user qgroup hierarchy"
-        else
-            # Alternative check: verify the relationship via qgroup show output format
-            print_result "INFO" "Uploads qgroup: $UPLOADS_QGROUP (parent relationship will be verified via quota enforcement)"
-        fi
+    # Check quota limit file
+    if [ -f "/home/$TEST_USER/.terminas-quota-limit" ]; then
+        QUOTA_LIMIT=$(cat "/home/$TEST_USER/.terminas-quota-limit")
+        print_result "PASS" "Quota limit config exists: ${QUOTA_LIMIT}GB"
+    else
+        print_result "INFO" "No quota limit config file found"
     fi
 else
-    print_result "FAIL" "User qgroup config file not found"
+    print_result "FAIL" "Uploads qgroup config file not found"
 fi
 
 # TEST 3: Verify quota is set correctly

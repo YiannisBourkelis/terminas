@@ -572,9 +572,10 @@ echo "\$(date '+%F %T') ========================================" >> "\$LOG"
 #
 # Pattern: '^/home/[^/]+/versions(/|$)' matches /home/<user>/versions/ and subdirs
 # close_write: fired when a file is written and closed
+# delete: fired when a file is deleted (used to re-check quota for blocked users)
 # This captures both direct uploads and atomic uploads (temp files)
 # Strategy: Debounce with inactivity window to coalesce multiple uploads
-inotifywait -m -r /home --exclude '^/home/[^/]+/versions(/|$)' -e close_write --format '%w%f %e' |
+inotifywait -m -r /home --exclude '^/home/[^/]+/versions(/|$)' -e close_write -e delete --format '%w%f %e' |
 while read path event; do
     # Log ALL events for debugging (will be noisy but helpful)
     echo "\$(date '+%F %T') Raw event: path=\$path, event=\$event" >> "\$LOG"
@@ -597,6 +598,61 @@ while read path event; do
 
     if [ ! -d "/home/\$user/uploads" ]; then
         # uploads dir might have been removed
+        continue
+    fi
+    
+    # Handle DELETE events - re-check quota for blocked users
+    if [ "\$event" = "DELETE" ]; then
+        # Only re-check if user is blocked (quota exceeded flag exists)
+        if [ -f "/home/\$user/.terminas-quota-exceeded" ]; then
+            echo "\$(date '+%F %T') Delete event for blocked user \$user - checking quota" >> "\$LOG"
+            
+            # Get configured quota limit
+            quota_limit_gb=\$(cat "/home/\$user/.terminas-quota-limit" 2>/dev/null || echo "0")
+            if [ "\$quota_limit_gb" != "0" ]; then
+                quota_limit_bytes=\$((quota_limit_gb * 1024 * 1024 * 1024))
+                
+                # Calculate total exclusive usage
+                total_exclusive_bytes=0
+                
+                # Get uploads exclusive usage
+                uploads_subvol_id=\$(btrfs subvolume show "/home/\$user/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
+                if [ -n "\$uploads_subvol_id" ]; then
+                    uploads_qgroup="0/\$uploads_subvol_id"
+                    uploads_excl=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\$uploads_qgroup\\s" | awk '{print \$2}' || echo "0")
+                    total_exclusive_bytes=\$((total_exclusive_bytes + uploads_excl))
+                fi
+                
+                # Get exclusive usage for all snapshots
+                if [ -d "/home/\$user/versions" ]; then
+                    for snap in /home/\$user/versions/*; do
+                        if [ -d "\$snap" ]; then
+                            snap_subvol_id=\$(btrfs subvolume show "\$snap" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
+                            if [ -n "\$snap_subvol_id" ]; then
+                                snap_qgroup="0/\$snap_subvol_id"
+                                snap_excl=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\$snap_qgroup\\s" | awk '{print \$2}' || echo "0")
+                                total_exclusive_bytes=\$((total_exclusive_bytes + snap_excl))
+                            fi
+                        fi
+                    done
+                fi
+                
+                total_gb=\$(echo "scale=2; \$total_exclusive_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                
+                # Check if now under quota
+                if [ "\$total_exclusive_bytes" -le "\$quota_limit_bytes" ]; then
+                    # UNDER QUOTA: Restore normal uploads limit
+                    if [ -n "\$uploads_qgroup" ]; then
+                        btrfs qgroup limit "\$quota_limit_bytes" "\$uploads_qgroup" /home 2>/dev/null || true
+                        rm -f "/home/\$user/.terminas-quota-exceeded" 2>/dev/null || true
+                        echo "\$(date '+%F %T') User \$user: Quota restored - now at \${total_gb}GB / \${quota_limit_gb}GB (uploads unblocked)" >> "\$LOG"
+                    fi
+                else
+                    echo "\$(date '+%F %T') User \$user: Still over quota at \${total_gb}GB / \${quota_limit_gb}GB" >> "\$LOG"
+                fi
+            fi
+        fi
+        # Don't trigger snapshot for delete events
         continue
     fi
     
@@ -691,58 +747,49 @@ while read path event; do
         fi
         
         # Check quota before creating snapshot
-        # Quota is enforced on user's level-1 qgroup (1/UID) which contains
-        # the uploads subvolume and all snapshot subvolumes.
-        # See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+        # Quota is enforced on uploads subvolume (level-0 qgroup) for fast enforcement.
+        # Hybrid mode checks total usage (uploads + snapshots) after each snapshot.
         # This pre-check provides clearer logging for administrators.
         if btrfs qgroup show /home &>/dev/null; then
             # Read user's qgroup from config file (created by create_user.sh)
-            user_qgroup=""
+            uploads_qgroup=""
             if [ -f "/home/\$user/.terminas-qgroup" ]; then
-                user_qgroup=\$(cat "/home/\$user/.terminas-qgroup" 2>/dev/null)
+                uploads_qgroup=\$(cat "/home/\$user/.terminas-qgroup" 2>/dev/null)
             fi
             
-            if [ -n "\$user_qgroup" ]; then
-                # Get quota usage from user's level-1 qgroup (raw bytes)
+            if [ -n "\$uploads_qgroup" ]; then
+                # Get quota usage from uploads subvolume (level-0 qgroup, raw bytes)
                 # Column 2 is rfer (referenced), column 3 is excl (exclusive)
-                # For level-1 qgroups, 'rfer' shows total data reachable from all contained subvolumes
-                qgroup_info=\$(btrfs qgroup show --raw /home 2>/dev/null | grep "^\${user_qgroup}\\s" || echo "")
-                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$2}')  # Use rfer for level-1
+                qgroup_info=\$(btrfs qgroup show --raw /home 2>/dev/null | grep "^\${uploads_qgroup}\\s" || echo "")
+                used_bytes=\$(echo "\$qgroup_info" | awk '{print \$2}')  # Use rfer for referenced size
                 
-                # Get quota limit (need -r flag to show limit columns for referenced limit)
-                # Column 4 is max_rfer (referenced limit) for level-1 qgroups
-                limit_info=\$(btrfs qgroup show --raw -r /home 2>/dev/null | grep "^\${user_qgroup}\\s" || echo "")
+                # Get quota limit (need -r flag to show limit column)
+                limit_info=\$(btrfs qgroup show --raw -r /home 2>/dev/null | grep "^\${uploads_qgroup}\\s" || echo "")
                 limit_bytes=\$(echo "\$limit_info" | awk '{print \$4}')
                 
                 if [ -n "\$used_bytes" ] && [ "\$used_bytes" != "0" ]; then
-                    # Check if limit is set
+                    # Check if quota exceeded flag is set (from hybrid quota check)
+                    if [ -f "/home/\$user/.terminas-quota-exceeded" ]; then
+                        quota_limit_file="/home/\$user/.terminas-quota-limit"
+                        quota_limit_gb=\$(cat "\$quota_limit_file" 2>/dev/null || echo "?")
+                        echo "\$(date '+%F %T') User \$user is over total quota (\${quota_limit_gb}GB limit) - snapshot still created" >> "\$LOG"
+                    fi
+                    
+                    # Check if limit is set on uploads
                     if [ "\$limit_bytes" != "0" ] && [ "\$limit_bytes" != "none" ] && [ -n "\$limit_bytes" ]; then
-                        # Calculate available space
+                        # Calculate available space on uploads
                         available_bytes=\$((limit_bytes - used_bytes))
                         
-                        # Reject snapshot if already at or over quota
-                        if [ "\$available_bytes" -le 0 ]; then
-                            # Over quota - reject snapshot
-                            used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
-                            limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
-                            echo "\$(date '+%F %T') ERROR: User \$user is at/over quota (\${used_gb}GB / \${limit_gb}GB)" >> "\$LOG"
-                            echo "\$(date '+%F %T') Snapshot creation blocked - user must free up space" >> "\$LOG"
-                            rm -f "\$processing_file" 2>/dev/null || true
-                            exit 0
-                        fi
-                        
-                        # Note: We cannot accurately predict snapshot size before creation due to
-                        # Btrfs Copy-on-Write. Snapshots initially share blocks with uploads subvolume
-                        # (minimal space), only diverging as files are modified. Btrfs will enforce
-                        # quota at filesystem level if snapshot would exceed limit.
-                        
-                        # Check warning threshold
-                        usage_pct=\$(echo "scale=1; (\$used_bytes / \$limit_bytes) * 100" | bc)
-                        if [ \$(echo "\$usage_pct > 90" | bc) -eq 1 ]; then
-                            used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
-                            limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
-                            available_gb=\$(echo "scale=2; \$available_bytes / 1024 / 1024 / 1024" | bc)
-                            echo "\$(date '+%F %T') WARNING: User \$user approaching quota limit (\${used_gb}GB / \${limit_gb}GB, \${usage_pct}%, \${available_gb}GB available)" >> "\$LOG"
+                        # Just log warning if approaching limit (snapshots still created)
+                        # The hybrid quota check after snapshot will block uploads if over total quota
+                        if [ "\$available_bytes" -gt 0 ]; then
+                            usage_pct=\$(echo "scale=1; (\$used_bytes / \$limit_bytes) * 100" | bc)
+                            if [ \$(echo "\$usage_pct > 90" | bc) -eq 1 ]; then
+                                used_gb=\$(echo "scale=2; \$used_bytes / 1024 / 1024 / 1024" | bc)
+                                limit_gb=\$(echo "scale=2; \$limit_bytes / 1024 / 1024 / 1024" | bc)
+                                available_gb=\$(echo "scale=2; \$available_bytes / 1024 / 1024 / 1024" | bc)
+                                echo "\$(date '+%F %T') WARNING: User \$user approaching uploads quota (\${used_gb}GB / \${limit_gb}GB, \${usage_pct}%)" >> "\$LOG"
+                            fi
                         fi
                     fi
                 fi
@@ -761,25 +808,6 @@ while read path event; do
         # 3. Make snapshot read-only for ransomware protection
         
         if btrfs subvolume snapshot "/home/\$user/uploads" "\$snapshot_path" >> "\$LOG" 2>&1; then
-            # Assign snapshot's qgroup to user's level-1 qgroup for proper quota accounting
-            # The level-1 qgroup (1/UID) contains all user data: uploads + all snapshots
-            # See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
-            if [ -f "/home/\$user/.terminas-qgroup" ]; then
-                user_qgroup=\$(cat "/home/\$user/.terminas-qgroup" 2>/dev/null)
-                if [ -n "\$user_qgroup" ]; then
-                    # Get the snapshot's subvolume ID
-                    snapshot_subvol_id=\$(btrfs subvolume show "\$snapshot_path" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
-                    if [ -n "\$snapshot_subvol_id" ]; then
-                        snapshot_qgroup="0/\$snapshot_subvol_id"
-                        if btrfs qgroup assign "\$snapshot_qgroup" "\$user_qgroup" /home 2>/dev/null; then
-                            echo "\$(date '+%F %T') Assigned snapshot qgroup \$snapshot_qgroup to user qgroup \$user_qgroup" >> "\$LOG"
-                        else
-                            echo "\$(date '+%F %T') WARNING: Failed to assign snapshot to user qgroup (quota may not be accurate)" >> "\$LOG"
-                        fi
-                    fi
-                fi
-            fi
-            
             # Snapshot created, now exclude in-progress files
             excluded_count=0
             
@@ -816,6 +844,67 @@ while read path event; do
                 echo "\$(date '+%F %T') Btrfs snapshot created for \$user at \$timestamp (\$snapshot_reason, excluded \$excluded_count in-progress files)" >> "\$LOG"
             else
                 echo "\$(date '+%F %T') Btrfs snapshot created for \$user at \$timestamp (\$snapshot_reason)" >> "\$LOG"
+            fi
+            
+            # HYBRID QUOTA CHECK: Calculate total usage (uploads + all snapshots)
+            # If over quota, block new uploads by setting uploads subvolume limit to 0
+            quota_limit_file="/home/\$user/.terminas-quota-limit"
+            if [ -f "\$quota_limit_file" ]; then
+                quota_limit_gb=\$(cat "\$quota_limit_file" 2>/dev/null || echo "0")
+                if [ "\$quota_limit_gb" -gt 0 ] 2>/dev/null; then
+                    quota_limit_bytes=\$((quota_limit_gb * 1024 * 1024 * 1024))
+                    
+                    # Calculate total exclusive usage for this user (uploads + all snapshots)
+                    total_exclusive_bytes=0
+                    
+                    # Get uploads exclusive usage
+                    if [ -d "/home/\$user/uploads" ]; then
+                        uploads_subvol_id=\$(btrfs subvolume show "/home/\$user/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
+                        if [ -n "\$uploads_subvol_id" ]; then
+                            uploads_qgroup="0/\$uploads_subvol_id"
+                            uploads_excl=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\$uploads_qgroup\\s" | awk '{print \$2}' || echo "0")
+                            total_exclusive_bytes=\$((total_exclusive_bytes + uploads_excl))
+                        fi
+                    fi
+                    
+                    # Get exclusive usage for all snapshots
+                    if [ -d "/home/\$user/versions" ]; then
+                        for snap in /home/\$user/versions/*; do
+                            if [ -d "\$snap" ]; then
+                                snap_subvol_id=\$(btrfs subvolume show "\$snap" 2>/dev/null | grep -oP 'Subvolume ID:\\s+\\K[0-9]+' || echo "")
+                                if [ -n "\$snap_subvol_id" ]; then
+                                    snap_qgroup="0/\$snap_subvol_id"
+                                    snap_excl=\$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^\$snap_qgroup\\s" | awk '{print \$2}' || echo "0")
+                                    total_exclusive_bytes=\$((total_exclusive_bytes + snap_excl))
+                                fi
+                            fi
+                        done
+                    fi
+                    
+                    total_gb=\$(echo "scale=2; \$total_exclusive_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+                    
+                    # Check if over quota
+                    if [ "\$total_exclusive_bytes" -gt "\$quota_limit_bytes" ]; then
+                        # OVER QUOTA: Block new uploads by setting uploads limit to 1 byte
+                        if [ -n "\$uploads_qgroup" ]; then
+                            btrfs qgroup limit 1 "\$uploads_qgroup" /home 2>/dev/null || true
+                            echo "\$(date '+%F %T') QUOTA EXCEEDED: User \$user is over quota (\${total_gb}GB / \${quota_limit_gb}GB) - uploads blocked" >> "\$LOG"
+                            
+                            # Create a flag file so user knows they're over quota
+                            echo "\$total_exclusive_bytes" > "/home/\$user/.terminas-quota-exceeded"
+                            chown root:root "/home/\$user/.terminas-quota-exceeded"
+                            chmod 644 "/home/\$user/.terminas-quota-exceeded"
+                        fi
+                    else
+                        # UNDER QUOTA: Restore normal uploads limit
+                        if [ -n "\$uploads_qgroup" ]; then
+                            # Remove any block (restore full quota on uploads)
+                            btrfs qgroup limit "\$quota_limit_bytes" "\$uploads_qgroup" /home 2>/dev/null || true
+                            rm -f "/home/\$user/.terminas-quota-exceeded" 2>/dev/null || true
+                            echo "\$(date '+%F %T') Quota check OK: User \$user at \${total_gb}GB / \${quota_limit_gb}GB" >> "\$LOG"
+                        fi
+                    fi
+                fi
             fi
         else
             echo "\$(date '+%F %T') ERROR: Failed to create Btrfs snapshot for \$user" >> "\$LOG"
@@ -1132,6 +1221,83 @@ else
 fi
 
 log_msg "Cleanup completed"
+
+# Re-check quota for users who are blocked (uploads quota set to 0 or 1)
+# This allows users to regain access after deleting files
+recheck_blocked_quotas() {
+    log_msg "Checking for blocked users who may now be under quota..."
+    
+    # Get list of backup users
+    local gid=$(getent group backupusers 2>/dev/null | cut -d: -f3)
+    local users=""
+    if [ -n "$gid" ]; then
+        users=$(getent passwd | awk -F: -v gid="$gid" '$4 == gid {print $1}')
+    fi
+    local supp_users=$(getent group backupusers 2>/dev/null | cut -d: -f4 | tr ',' '\n' | grep -v '^$')
+    if [ -n "$supp_users" ]; then
+        users=$(echo -e "$users\n$supp_users" | sort -u)
+    fi
+    
+    while IFS= read -r user; do
+        [ -z "$user" ] && continue
+        local home_dir="/home/$user"
+        
+        # Only check users with quota exceeded flag
+        [ ! -f "$home_dir/.terminas-quota-exceeded" ] && continue
+        
+        # Get configured quota limit
+        local quota_limit_gb=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
+        [ "$quota_limit_gb" = "0" ] && continue
+        
+        local quota_limit_bytes=$((quota_limit_gb * 1024 * 1024 * 1024))
+        
+        # Calculate total exclusive usage
+        local total_exclusive_bytes=0
+        
+        # Get uploads exclusive usage
+        if [ -d "$home_dir/uploads" ]; then
+            local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+            if [ -n "$uploads_subvol_id" ]; then
+                local uploads_qgroup="0/$uploads_subvol_id"
+                local uploads_excl=$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^$uploads_qgroup\s" | awk '{print $2}' || echo "0")
+                total_exclusive_bytes=$((total_exclusive_bytes + uploads_excl))
+            fi
+        fi
+        
+        # Get exclusive usage for all snapshots
+        if [ -d "$home_dir/versions" ]; then
+            for snap in "$home_dir/versions"/*; do
+                if [ -d "$snap" ]; then
+                    local snap_subvol_id=$(btrfs subvolume show "$snap" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+                    if [ -n "$snap_subvol_id" ]; then
+                        local snap_qgroup="0/$snap_subvol_id"
+                        local snap_excl=$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^$snap_qgroup\s" | awk '{print $2}' || echo "0")
+                        total_exclusive_bytes=$((total_exclusive_bytes + snap_excl))
+                    fi
+                fi
+            done
+        fi
+        
+        local total_gb=$(echo "scale=2; $total_exclusive_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+        
+        # Check if now under quota
+        if [ "$total_exclusive_bytes" -le "$quota_limit_bytes" ]; then
+            # UNDER QUOTA: Restore normal uploads limit
+            if [ -n "$uploads_qgroup" ]; then
+                btrfs qgroup limit "$quota_limit_bytes" "$uploads_qgroup" /home 2>/dev/null || true
+                rm -f "$home_dir/.terminas-quota-exceeded" 2>/dev/null || true
+                log_msg "User $user: Quota restored - now at ${total_gb}GB / ${quota_limit_gb}GB (uploads unblocked)"
+            fi
+        else
+            log_msg "User $user: Still over quota at ${total_gb}GB / ${quota_limit_gb}GB"
+        fi
+    done <<< "$users"
+}
+
+# Run quota recheck after cleanup (cleanup may have freed space)
+recheck_blocked_quotas
+
+log_msg "All maintenance tasks completed"
 EOF
 chmod +x /var/terminas/scripts/terminas-cleanup.sh
 
