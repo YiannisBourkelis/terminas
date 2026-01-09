@@ -138,16 +138,51 @@ if ! btrfs qgroup show /home &>/dev/null; then
 fi
 print_result "PASS" "Btrfs quotas enabled on /home"
 
+# Check for qgroup data inconsistency (critical - can cause kernel hangs during writes)
+echo "Checking qgroup data consistency..."
+qgroup_output=$(btrfs qgroup show /home 2>&1)
+if echo "$qgroup_output" | grep -qi "qgroup data inconsistent"; then
+    print_result "FAIL" "Qgroup data is inconsistent - quota operations may hang!"
+    echo ""
+    echo -e "${YELLOW}The Btrfs qgroup data is inconsistent and needs a rescan.${NC}"
+    echo -e "${YELLOW}Without this, file writes to quota-enabled directories may hang.${NC}"
+    echo ""
+    echo "To fix, run:"
+    echo "  sudo btrfs quota rescan /home"
+    echo "  # Wait for completion with:"
+    echo "  sudo btrfs quota rescan -s /home"
+    echo "  # (repeat -s until it shows 'no rescan operation in progress')"
+    echo ""
+    echo "Or run rescan and wait automatically:"
+    echo "  sudo btrfs quota rescan -w /home"
+    echo ""
+    read -p "Would you like to run a quota rescan now? (y/N) " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Starting quota rescan (this may take a while for large filesystems)..."
+        btrfs quota rescan -w /home
+        print_result "PASS" "Quota rescan completed"
+    else
+        echo "Aborting test. Please run the rescan manually before testing."
+        exit 1
+    fi
+else
+    print_result "PASS" "Qgroup data is consistent"
+fi
+
 # Wait for any ongoing quota rescan to complete (critical for quota enforcement)
 echo "Checking for ongoing quota rescan..."
-rescan_status=$(btrfs quota rescan-status /home 2>&1)
-if echo "$rescan_status" | grep -q "running"; then
+rescan_status=$(btrfs quota rescan -s /home 2>&1)
+if echo "$rescan_status" | grep -qi "running\|progress"; then
     echo "Quota rescan is in progress. Waiting for completion..."
     echo "(This may take a while for large filesystems)"
     btrfs quota rescan -w /home 2>/dev/null || true
     print_result "PASS" "Quota rescan completed"
-else
+elif echo "$rescan_status" | grep -qi "no rescan"; then
     print_result "PASS" "No quota rescan in progress"
+else
+    # Unknown status, continue anyway
+    print_result "INFO" "Quota rescan status: $rescan_status"
 fi
 
 if [ ! -f "$SCRIPT_DIR/create_user.sh" ]; then
@@ -194,7 +229,7 @@ fi
 
 # Check if quota rescan is in progress (can cause slowdowns)
 echo "Debug: Checking quota rescan status..."
-rescan_status=$(btrfs quota rescan-status /home 2>&1 || echo "unknown")
+rescan_status=$(btrfs quota rescan -s /home 2>&1 || echo "unknown")
 echo "  Rescan status: $rescan_status"
 
 echo "Creating 500MB test file with random data..."
@@ -222,10 +257,10 @@ else
         print_result "FAIL" "Copy timed out after 120 seconds"
         echo ""
         echo "Debug: This may indicate a Btrfs qgroup issue."
-        echo "Check: btrfs quota rescan-status /home"
+        echo "Check: btrfs quota rescan -s /home"
         echo "Check: btrfs qgroup show -r /home"
         echo ""
-        echo "If quota rescan is running, wait for it to complete:"
+        echo "If qgroup data is inconsistent, run a rescan:"
         echo "  btrfs quota rescan -w /home"
     else
         print_result "FAIL" "500MB file upload failed unexpectedly (exit code: $exit_code)"
