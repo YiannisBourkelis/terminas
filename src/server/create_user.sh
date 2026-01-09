@@ -270,56 +270,71 @@ if [ -z "$QUOTA_GB" ]; then
     fi
 fi
 
-if [ "$QUOTA_GB" -gt 0 ]; then
-    echo "Setting up Btrfs quota: ${QUOTA_GB}GB..."
+# Setup Btrfs qgroup hierarchy for user quota
+# Architecture: Create level-1 qgroup (1/$UID) that contains the uploads subvolume
+# and will contain all snapshot subvolumes. This properly accounts for all user data.
+# See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
+
+echo "Setting up Btrfs qgroup hierarchy..."
+
+# Check if quotas are enabled
+if ! btrfs qgroup show /home &>/dev/null; then
+    echo "  ⚠ WARNING: Btrfs quotas not enabled on /home"
+    echo "  Run setup.sh to enable quotas, or manually: btrfs quota enable /home"
+    echo "  Quota tracking will not be available for this user"
+else
+    # Get the user's UID for the level-1 qgroup ID
+    USER_UID=$(id -u "$USERNAME")
+    USER_QGROUP="1/$USER_UID"
     
-    # Check if quotas are enabled
-    if ! btrfs qgroup show /home &>/dev/null; then
-        echo "  ⚠ WARNING: Btrfs quotas not enabled on /home"
-        echo "  Run setup.sh to enable quotas, or manually: btrfs quota enable /home"
-        echo "  Skipping quota setup"
-    else
-        # Get the qgroup ID for the uploads subvolume
-        UPLOADS_SUBVOL_ID=$(btrfs subvolume show "/home/$USERNAME/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+    # Get the uploads subvolume ID
+    UPLOADS_SUBVOL_ID=$(btrfs subvolume show "/home/$USERNAME/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+    
+    if [ -n "$UPLOADS_SUBVOL_ID" ]; then
+        UPLOADS_QGROUP="0/$UPLOADS_SUBVOL_ID"
         
-        if [ -n "$UPLOADS_SUBVOL_ID" ]; then
-            # Create a level-1 qgroup to track total disk usage (uploads + all snapshots)
-            # Using the uploads subvolume ID as the qgroup number for easy identification
-            # Level-1 qgroups with exclusive (excl) limits track actual physical disk usage
-            TRACKING_QGROUP="1/$UPLOADS_SUBVOL_ID"
-            
-            # Create the level-1 qgroup (ignore error if already exists)
-            if btrfs qgroup create "$TRACKING_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Created tracking qgroup: $TRACKING_QGROUP"
-            else
-                echo "  ✓ Using existing tracking qgroup: $TRACKING_QGROUP"
-            fi
-            
-            # Assign uploads subvolume (0/id) to the tracking qgroup (1/id)
-            if btrfs qgroup assign "0/$UPLOADS_SUBVOL_ID" "$TRACKING_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Assigned uploads qgroup to tracking qgroup"
-            fi
-            
-            # Set exclusive quota limit on the level-1 qgroup
-            # This limits the total PHYSICAL disk usage (deduplicated) across uploads + all snapshots
-            # Writes will fail with "Disk quota exceeded" when physical usage exceeds limit
-            QUOTA_BYTES=$((QUOTA_GB * 1024 * 1024 * 1024))
-            if btrfs qgroup limit -e "$QUOTA_BYTES" "$TRACKING_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Set exclusive quota limit: ${QUOTA_GB}GB on $TRACKING_QGROUP"
-            else
-                echo "  ⚠ WARNING: Failed to set quota limit"
-            fi
-            
-            # Store the tracking qgroup ID for the monitor to use when creating snapshots
-            echo "$TRACKING_QGROUP" > "/home/$USERNAME/.terminas-qgroup"
-            chown root:root "/home/$USERNAME/.terminas-qgroup"
-            chmod 644 "/home/$USERNAME/.terminas-qgroup"
+        # Create level-1 qgroup for this user (1/UID)
+        # This qgroup will contain the uploads subvolume and all snapshots
+        if btrfs qgroup create "$USER_QGROUP" /home 2>/dev/null; then
+            echo "  ✓ Created user qgroup: $USER_QGROUP"
         else
-            echo "  ⚠ WARNING: Could not determine subvolume ID for quota setup"
+            # Qgroup might already exist (e.g., from a previous user with same UID)
+            echo "  ✓ User qgroup exists: $USER_QGROUP"
         fi
+        
+        # Assign uploads subvolume's level-0 qgroup to the user's level-1 qgroup
+        if btrfs qgroup assign "$UPLOADS_QGROUP" "$USER_QGROUP" /home 2>/dev/null; then
+            echo "  ✓ Assigned uploads subvolume ($UPLOADS_QGROUP) to user qgroup"
+        else
+            echo "  ⚠ WARNING: Failed to assign uploads subvolume to user qgroup"
+        fi
+        
+        # Set quota limit on the level-1 qgroup if quota is configured
+        if [ "$QUOTA_GB" -gt 0 ]; then
+            QUOTA_BYTES=$((QUOTA_GB * 1024 * 1024 * 1024))
+            
+            # Set referenced limit on level-1 qgroup
+            # Referenced limit accounts for all data reachable from contained subvolumes
+            # This is the correct approach for hierarchical quotas
+            if btrfs qgroup limit "$QUOTA_BYTES" "$USER_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Set quota limit: ${QUOTA_GB}GB on user qgroup ($USER_QGROUP)"
+            else
+                echo "  ⚠ WARNING: Failed to set quota limit on user qgroup"
+            fi
+        else
+            echo "  Quota: Unlimited (not enforced)"
+        fi
+        
+        # Store the user's qgroup ID for reference (used by manage_users.sh, delete_user.sh)
+        echo "$USER_QGROUP" > "/home/$USERNAME/.terminas-qgroup"
+        chown root:root "/home/$USERNAME/.terminas-qgroup"
+        chmod 644 "/home/$USERNAME/.terminas-qgroup"
+        
+        echo "  ✓ Qgroup hierarchy configured successfully"
+    else
+        echo "  ⚠ WARNING: Could not determine uploads subvolume ID"
+        echo "  Quota tracking will not be available for this user"
     fi
-elif [ "$QUOTA_GB" -eq 0 ]; then
-    echo "Quota: Unlimited (not enforced)"
 fi
 
 # Setup Samba share if requested

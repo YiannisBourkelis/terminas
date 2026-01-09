@@ -106,6 +106,35 @@ Windows: C:\Program Files\terminas-backup\, C:\ProgramData\terminas-credentials\
 - **GitHub**: Repository hosting at YiannisBourkelis/terminas
 - **Markdown**: Documentation format
 
+## Official Documentation Links
+
+Reference documentation for key technologies used in this project:
+
+### Filesystem & Storage
+- **Btrfs Quota Groups (qgroups)**: https://btrfs.readthedocs.io/en/latest/Qgroups.html
+- **Btrfs Documentation**: https://btrfs.readthedocs.io/en/latest/
+- **Linux Quota**: https://linux.die.net/man/1/quota
+
+### Monitoring & Automation
+- **inotify-tools**: https://github.com/inotify-tools/inotify-tools/wiki
+- **systemd Services**: https://www.freedesktop.org/software/systemd/man/systemd.service.html
+- **cron**: https://man7.org/linux/man-pages/man5/crontab.5.html
+
+### SSH & Security
+- **OpenSSH**: https://www.openssh.com/manual.html
+- **SFTP Chroot Configuration**: https://man.openbsd.org/sshd_config#ChrootDirectory
+- **fail2ban**: https://www.fail2ban.org/wiki/index.php/Main_Page
+- **iptables**: https://linux.die.net/man/8/iptables
+
+### File Transfer & Sync
+- **rsync**: https://download.samba.org/pub/rsync/rsync.1
+- **lftp**: https://lftp.yar.ru/lftp-man.html
+- **WinSCP Scripting**: https://winscp.net/eng/docs/scripting
+
+### Scripting
+- **Bash Reference Manual**: https://www.gnu.org/software/bash/manual/bash.html
+- **PowerShell Documentation**: https://docs.microsoft.com/en-us/powershell/
+
 ## Architecture and Design Patterns
 
 ### Security Architecture
@@ -122,10 +151,29 @@ Windows: C:\Program Files\terminas-backup\, C:\ProgramData\terminas-credentials\
 
 ### Snapshot Strategy
 - **Trigger**: inotify events (`close_write`, `moved_to`) - captures complete files only
-- **Method**: rsync with `--link-dest` pointing to previous snapshot
+- **Method**: Btrfs snapshot (not rsync) for instant, space-efficient copies
 - **Timing**: Debounce period (default 10s) to coalesce rapid changes
-- **Storage**: Hardlinks for unchanged files = space-efficient versioning
+- **Storage**: CoW snapshots share data blocks with source until modified
 - **Ownership**: root:backupusers with 755 (readable by user, immutable)
+
+### Btrfs Quota Architecture
+Per-user storage quotas use hierarchical qgroups per the Btrfs documentation:
+
+**Level-1 Qgroup (1/UID)**: Container qgroup for each user
+- Created when user is created (`create_user.sh`)
+- Quota limit is set on this level-1 qgroup
+- Stored in `/home/<username>/.terminas-qgroup`
+
+**Level-0 Qgroups (0/SUBVOL_ID)**: Automatic qgroups for each subvolume
+- Uploads subvolume: Assigned to user's level-1 qgroup at creation
+- Snapshot subvolumes: Assigned to user's level-1 qgroup when created by monitor
+
+**Quota Enforcement**:
+- Limit is set on level-1 qgroup using `btrfs qgroup limit <bytes> 1/<UID> /home`
+- Btrfs automatically enforces the limit across ALL contained subvolumes
+- "Disk quota exceeded" error when user exceeds their quota
+
+**Reference**: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
 
 ### Retention Policy
 **Grandfather-Father-Son (default)**:

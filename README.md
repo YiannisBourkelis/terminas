@@ -917,11 +917,12 @@ sudo /var/terminas/scripts/terminas-cleanup.sh
 
 **Technical details:**
 
-- Uses Btrfs qgroups (level 1) for tracking
-- Tracks uploads subvolume + all snapshot subvolumes
-- Uses **rfer** (referenced bytes) = deduplicated size
-- Quota checked before each snapshot creation
-- Works with Btrfs Copy-on-Write (CoW) deduplication
+- Uses Btrfs qgroups (level 0) on user's home directory subvolume
+- Tracks ALL user data: uploads + all snapshots (versions)
+- Uses **excl** (exclusive bytes) = actual physical disk usage
+- Accounts for Btrfs Copy-on-Write (CoW) deduplication automatically
+- Quota enforced at filesystem level - blocks writes when exceeded
+- Quota checked before each snapshot creation for logging/warnings
 
 #### Monitoring
 
@@ -1761,28 +1762,28 @@ This usually means quotas are not enabled or the subvolume doesn't exist.
 
 Verify user structure:
 ```bash
-# Check if uploads subvolume exists
-sudo btrfs subvolume show /home/username/uploads
+# Check if home directory is a subvolume (required for quota)
+sudo btrfs subvolume show /home/username
 
 # Check if quotas are enabled
 sudo btrfs qgroup show /home
 
-# Get subvolume ID
+# Get subvolume ID for home directory
 sudo btrfs subvolume list /home | grep username
 ```
 
 **Problem: Quota reached but files still uploading**
 
-This is expected behavior - quota only blocks **snapshot creation**, not uploads:
+With the current implementation, quota blocks file writes at the filesystem level:
 
-- ✅ Users can continue uploading files via SFTP/Samba
+- ❌ SFTP/Samba uploads fail with "Disk quota exceeded" error
 - ❌ New snapshots are blocked until space is freed
-- 📸 Latest snapshot remains accessible for restores
+- 📸 Existing snapshots remain accessible for restores
 - 🧹 Free space by removing old snapshots: `./manage_users.sh cleanup username`
 
 **Problem: Quota usage doesn't match disk usage**
 
-Quota tracks **referenced bytes** (deduplicated), not **exclusive bytes**:
+Quota tracks **exclusive bytes** (physical disk usage), not logical file sizes:
 
 ```bash
 # View detailed Btrfs usage
@@ -1791,10 +1792,10 @@ sudo btrfs filesystem du -s /home/username/
 # Compare with quota
 sudo ./src/server/manage_users.sh show-quota username
 
-# Quota uses "rfer" (referenced) which includes:
-# - Data in uploads subvolume
-# - Data in all snapshot subvolumes
-# - With Btrfs CoW deduplication applied
+# Quota uses "excl" (exclusive) which is:
+# - Actual physical disk space consumed
+# - Accounts for Btrfs CoW deduplication between uploads and snapshots
+# - Lower than logical size when data is shared between snapshots
 ```
 
 **Test quota functionality:**

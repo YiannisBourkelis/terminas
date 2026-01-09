@@ -4,12 +4,17 @@
 # Usage: ./test_uploads_quota.sh [--cleanup-only]
 #
 # This is a quick test that verifies quota enforcement works without waiting
-# for snapshots. It creates a user with 1GB quota (exclusive/physical bytes),
-# uploads a 500MB file (should succeed), then tries to upload a 1GB file
-# (should fail with "Disk quota exceeded").
+# for snapshots. It creates a user with 1GB quota, uploads a 500MB file
+# (should succeed), then tries to upload a 1GB file (should fail with
+# "Disk quota exceeded").
 #
-# Quota is tracked using a level-1 qgroup that measures actual physical disk
-# usage across uploads + all snapshots (with Btrfs deduplication).
+# Quota Architecture (per Btrfs qgroup documentation):
+# - Level-1 qgroup (1/$UID) is created for each user
+# - The uploads subvolume's level-0 qgroup is assigned as a child
+# - All snapshot level-0 qgroups are assigned as children when created
+# - Quota limit is set on the level-1 qgroup, which enforces limits
+#   across ALL user data: uploads + all snapshots
+# See: https://btrfs.readthedocs.io/en/latest/Qgroups.html (Multi-user machine section)
 #
 # Copyright (c) 2025 Yianni Bourkelis
 # Licensed under the MIT License - see LICENSE file for details
@@ -227,12 +232,30 @@ if cp "$TEST_FILE_1GB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
     # Show quota status for debugging
     "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER"
     
-    # Show qgroup details
+    # Show qgroup details for debugging
     echo ""
-    echo "Qgroup details:"
+    echo "Qgroup details (raw):"
+    
+    # Read user's level-1 qgroup from config file
+    user_qgroup=""
+    if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
+        user_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup" 2>/dev/null)
+    fi
+    echo "User qgroup (from config): $user_qgroup"
+    
     uploads_subvol_id=$(btrfs subvolume show "/home/$TEST_USER/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "unknown")
     echo "Uploads subvolume ID: $uploads_subvol_id"
-    btrfs qgroup show -re /home 2>/dev/null | grep -E "^(qgroupid|0/$uploads_subvol_id)" || true
+    
+    echo ""
+    echo "Level-1 qgroup (user quota container):"
+    btrfs qgroup show -r /home 2>/dev/null | head -1
+    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${user_qgroup}" || echo "  (not found)"
+    
+    echo ""
+    echo "Level-0 qgroups (subvolumes):"
+    btrfs qgroup show /home 2>/dev/null | grep -E "0/$uploads_subvol_id" || echo "  (uploads qgroup not found)"
+    echo ""
+    echo "Note: Quota is enforced on the level-1 qgroup (1/UID) which contains uploads + all snapshots"
     
     TEST_RESULT="FAIL"
 else

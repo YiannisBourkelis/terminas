@@ -151,18 +151,30 @@ if [ -f "/etc/samba/smb.conf.d/$USERNAME.conf" ]; then
     fi
 fi
 
-# Remove quota if set
+# Remove quota and destroy user's level-1 qgroup
 if btrfs qgroup show /home &>/dev/null; then
-    # Get subvolume ID for uploads subvolume
-    SUBVOL_ID=$(btrfs subvolume show "/home/$USERNAME/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+    # Read user's level-1 qgroup from config file (created by create_user.sh)
+    USER_QGROUP=""
+    if [ -f "/home/$USERNAME/.terminas-qgroup" ]; then
+        USER_QGROUP=$(cat "/home/$USERNAME/.terminas-qgroup" 2>/dev/null)
+    fi
     
-    if [ -n "$SUBVOL_ID" ]; then
-        # Remove level 1 qgroup if it exists
-        QGROUP_ID="1/$SUBVOL_ID"
-        if btrfs qgroup show /home 2>/dev/null | grep -q "^${QGROUP_ID}\s"; then
-            echo "Removing quota for user..."
-            btrfs qgroup destroy "$QGROUP_ID" /home 2>/dev/null || true
+    # Fallback: try to construct qgroup from UID if config file doesn't exist
+    if [ -z "$USER_QGROUP" ]; then
+        USER_UID=$(id -u "$USERNAME" 2>/dev/null || echo "")
+        if [ -n "$USER_UID" ]; then
+            USER_QGROUP="1/$USER_UID"
         fi
+    fi
+    
+    if [ -n "$USER_QGROUP" ]; then
+        # Remove quota limit first
+        btrfs qgroup limit none "$USER_QGROUP" /home 2>/dev/null || true
+        
+        # Note: We cannot destroy the level-1 qgroup until all child qgroups 
+        # (uploads subvolume, snapshots) are deleted. The qgroup will be destroyed
+        # after we delete all subvolumes below.
+        echo "Preparing to clean up user qgroup: $USER_QGROUP"
     fi
 fi
 
@@ -242,5 +254,16 @@ rm -f "/var/run/terminas/last_$USERNAME" 2>/dev/null || true
 rm -f "/var/run/terminas/activity_$USERNAME" 2>/dev/null || true
 rm -f "/var/run/terminas/snapshot_$USERNAME" 2>/dev/null || true
 rm -f "/var/run/terminas/processing_$USERNAME" 2>/dev/null || true
+
+# Now destroy the user's level-1 qgroup (after all child subvolumes are deleted)
+# The qgroup can only be destroyed after all contained level-0 qgroups are removed
+if [ -n "$USER_QGROUP" ]; then
+    if btrfs qgroup destroy "$USER_QGROUP" /home 2>/dev/null; then
+        echo "Cleaned up user qgroup: $USER_QGROUP"
+    else
+        # This is normal if the qgroup didn't exist or was already cleaned up
+        true
+    fi
+fi
 
 echo "User $USERNAME and all their data have been deleted."
