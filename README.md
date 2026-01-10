@@ -1573,6 +1573,11 @@ Whitelist trusted IPs (edit `/etc/fail2ban/jail.local`):
 ignoreip = 127.0.0.1/8 ::1 192.168.1.0/24 10.0.0.0/8
 ```
 
+**Known issue: Pending Btrfs deletions after snapshot removal**
+
+- The current single inotify watcher keeps kernel references when snapshots are removed (including retention cleanup and user deletions), so Btrfs shows pending deletions and does not reclaim space until the monitor restarts. See [docs/ARCHITECTURE_PER_USER_INOTIFY.md](docs/ARCHITECTURE_PER_USER_INOTIFY.md) for the architecture discussion and proposed fixes.
+- **Workaround**: After snapshots are deleted (retention cleanup or user removal), reclaim space with `sudo ./src/server/manage_users.sh force-clean` (restarts the monitor and commits Btrfs deletions). If the script is not in your current directory, run it from its install path.
+
 **Problem: Snapshots missing files or contain incomplete files**
 
 **This is now fixed!** The new monitor logic creates **periodic snapshots** (every 30 minutes) that automatically exclude in-progress files.

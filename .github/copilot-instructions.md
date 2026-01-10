@@ -284,6 +284,7 @@ Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-perfo
 - **Issue**: Using `create` event captures incomplete files during upload
 - **Solution**: Use only `close_write` and `moved_to` events (captures complete files)
 - **Trade-off**: Very fast uploads may complete before close_write triggers
+- **Note**: Current inotify monitor bug: snapshots cannot be deleted until the service is restarted (see docs/ARCHITECTURE_PER_USER_INOTIFY.md)
 
 ### fail2ban and Testing
 - **Issue**: Testing authentication from same IP can trigger bans
