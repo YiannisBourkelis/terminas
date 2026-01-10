@@ -122,6 +122,24 @@ echo "Test user: $TEST_USER"
 echo "Quota limit: ${TEST_QUOTA_GB}GB"
 echo ""
 
+# Stop monitor to avoid background moves during the test
+MONITOR_STOPPED=false
+if systemctl list-units --type=service 2>/dev/null | grep -q "terminas-monitor.service"; then
+    if systemctl is-active --quiet terminas-monitor.service; then
+        echo "Stopping terminas-monitor.service for testing..."
+        systemctl stop terminas-monitor.service || true
+        MONITOR_STOPPED=true
+    fi
+fi
+# Fallback kill if systemctl not present or service name differs
+if [ "$MONITOR_STOPPED" = false ]; then
+    if pgrep -f "terminas-monitor" >/dev/null 2>&1; then
+        echo "Stopping terminas-monitor (pgrep fallback)..."
+        pkill -f "terminas-monitor" || true
+        MONITOR_STOPPED=true
+    fi
+fi
+
 # Cleanup any existing test user first
 cleanup_test_user
 
@@ -287,6 +305,16 @@ echo "Updating quota accounting..."
 sync
 sleep 1  # Brief pause to ensure accounting is updated
 
+echo "Listing uploads directory contents:"
+ls -lh "/home/$TEST_USER/uploads/" || true
+
+echo "Raw qgroup entry after 500MB copy:"
+if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
+    uploads_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup")
+    btrfs qgroup show -r /home 2>/dev/null | head -1
+    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${uploads_qgroup}\s|^${uploads_qgroup}$" || true
+fi
+
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" 2>&1 | head -20
 echo ""
 
@@ -362,6 +390,19 @@ if [ -f "/home/$TEST_USER/uploads/test_1gb.dat" ]; then
     print_result "INFO" "Warning: Partial file may exist (${actual_copied}MB)"
 fi
 
+# Sync and show raw qgroup after 1GB attempt
+echo "Syncing and showing qgroup after 1GB attempt..."
+sync
+sleep 1
+echo "Listing uploads directory contents:"
+ls -lh "/home/$TEST_USER/uploads/" || true
+if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
+    uploads_qgroup=$(cat "/home/$TEST_USER/.terminas-qgroup")
+    echo "Raw qgroup entry:"
+    btrfs qgroup show -r /home 2>/dev/null | head -1
+    btrfs qgroup show -r /home 2>/dev/null | grep -E "^${uploads_qgroup}\s|^${uploads_qgroup}$" || true
+fi
+
 # TEST 4: Show final quota status
 print_header "TEST 4/4: Final Quota Status"
 
@@ -393,6 +434,14 @@ echo ""
 # Cleanup
 print_header "Cleanup"
 cleanup_test_user
+
+# Restart monitor if we stopped it
+if [ "$MONITOR_STOPPED" = true ]; then
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "terminas-monitor.service"; then
+        echo "Starting terminas-monitor.service..."
+        systemctl start terminas-monitor.service || true
+    fi
+fi
 
 echo -e "${GREEN}Test completed.${NC}"
 
