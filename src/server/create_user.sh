@@ -18,37 +18,14 @@ fi
 
 set -e
 
-# Function to validate password strength
-validate_password() {
-    local password="$1"
-    local length=${#password}
-    
-    # Check minimum length (30 characters)
-    if [ "$length" -lt 30 ]; then
-        echo "ERROR: Password must be at least 30 characters long (provided: $length characters)"
-        return 1
-    fi
-    
-    # Check for lowercase letters
-    if ! echo "$password" | grep -q '[a-z]'; then
-        echo "ERROR: Password must contain at least one lowercase letter"
-        return 1
-    fi
-    
-    # Check for uppercase letters
-    if ! echo "$password" | grep -q '[A-Z]'; then
-        echo "ERROR: Password must contain at least one uppercase letter"
-        return 1
-    fi
-    
-    # Check for numbers
-    if ! echo "$password" | grep -q '[0-9]'; then
-        echo "ERROR: Password must contain at least one number"
-        return 1
-    fi
-    
-    return 0
-}
+# Source common functions
+COMMON_LIB="$SCRIPT_DIR/common.sh"
+if [ -f "$COMMON_LIB" ]; then
+    source "$COMMON_LIB"
+else
+    echo "ERROR: Cannot find common.sh library"
+    exit 1
+fi
 
 # Function to setup Samba share with strict security
 setup_samba_share() {
@@ -159,23 +136,29 @@ EOF
 
 # Parse command line arguments
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine]"
+    echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine] [-q|--quota <GB|MB>]"
     echo ""
     echo "Options:"
     echo "  -p, --password     Manually specify password (must be 30+ chars with lowercase, uppercase, and numbers)"
     echo "  -s, --samba        Enable Samba (SMB) sharing for uploads directory"
     echo "  -t, --timemachine  Enable macOS Time Machine support (requires --samba)"
+    echo "  -q, --quota        Set storage quota (default unit GB; append MB for megabytes, 0 = unlimited, default from /etc/terminas-retention.conf)"
     echo ""
     echo "If no password is provided, a secure 64-character random password will be generated."
     echo "Samba sharing allows other applications to use the uploads directory as a network share."
     echo "Time Machine support enables macOS backup functionality via Samba."
+    echo "Quota limits total disk usage (uploads + all snapshots) tracked via Btrfs qgroups."
     exit 1
 fi
 
 USERNAME=$1
-PASSWORD=""
+PASSWORD_PROVIDED=false
 ENABLE_SAMBA=false
 ENABLE_TIMEMACHINE=false
+QUOTA_RAW=""
+QUOTA_BYTES=0
+QUOTA_DISPLAY="0GB"
+QUOTA_STORE="0"
 
 # Parse optional parameters
 shift
@@ -197,9 +180,17 @@ while [ $# -gt 0 ]; do
             ENABLE_TIMEMACHINE=true
             shift
             ;;
+        -q|--quota)
+            if [ -z "${2:-}" ]; then
+                echo "ERROR: --quota requires a value (e.g., 50, 50GB, 13000MB)"
+                exit 1
+            fi
+            QUOTA_RAW="$2"
+            shift 2
+            ;;
         *)
             echo "ERROR: Unknown parameter: $1"
-            echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine]"
+            echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine] [-q|--quota <GB|MB>]"
             exit 1
             ;;
     esac
@@ -231,30 +222,50 @@ else
     echo "Using provided password (validated: 30+ chars, lowercase, uppercase, numbers)"
 fi
 
+# Resolve and validate quota before creating any system state
+if [ -z "$QUOTA_RAW" ]; then
+    # Load default quota from config file (legacy GB field)
+    if [ -f /etc/terminas-retention.conf ]; then
+        source /etc/terminas-retention.conf
+        QUOTA_RAW="${DEFAULT_QUOTA_GB:-0}"
+    else
+        QUOTA_RAW=0
+    fi
+fi
+
+QUOTA_BYTES=0
+QUOTA_DISPLAY="0GB"
+QUOTA_STORE="0"
+QUOTA_UNIT="GB"
+if quota_parsed=$(parse_quota_value "$QUOTA_RAW"); then
+    QUOTA_BYTES=$(echo "$quota_parsed" | cut -d'|' -f1)
+    QUOTA_AMOUNT=$(echo "$quota_parsed" | cut -d'|' -f2)
+    QUOTA_UNIT=$(echo "$quota_parsed" | cut -d'|' -f3)
+    QUOTA_DISPLAY=$(echo "$quota_parsed" | cut -d'|' -f4)
+    # Enforce non-negative integer quota (0 allowed for unlimited)
+    if ! [[ "$QUOTA_AMOUNT" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Quota must be a positive integer with optional GB/MB suffix"
+        exit 1
+    fi
+    if [ "$QUOTA_UNIT" = "MB" ]; then
+        QUOTA_STORE="${QUOTA_AMOUNT}MB"
+    else
+        QUOTA_STORE="$QUOTA_AMOUNT"
+    fi
+else
+    echo "ERROR: Invalid quota value '$QUOTA_RAW' (expected integer with optional GB/MB suffix)"
+    exit 1
+fi
+
 echo "Creating user $USERNAME with password: $PASSWORD"
 # Create user
 useradd -m -g backupusers -s /usr/sbin/nologin "$USERNAME"
 
-# Set the user's password securely. Prefer creating a SHA-512 hash and applying it with usermod -p.
-# Check that python3 exists and provides the 'crypt' module. If not, fall back to openssl,
-# and as a last resort use chpasswd (note: chpasswd will break if the password contains ':').
-if command -v python3 >/dev/null 2>&1 && python3 -c "import crypt" >/dev/null 2>&1; then
-    HASH=$(python3 - <<'PY'
-import crypt,sys
-pw=sys.stdin.read().rstrip('\n')
-print(crypt.crypt(pw, crypt.mksalt(crypt.METHOD_SHA512)))
-PY
-    ) <<<"$PASSWORD"
-    usermod -p "$HASH" "$USERNAME"
-elif command -v openssl >/dev/null 2>&1; then
-    # Fallback: openssl passwd -6
-    HASH=$(openssl passwd -6 "$PASSWORD")
-    usermod -p "$HASH" "$USERNAME"
-else
-    # As a last resort, use chpasswd (note: will fail if password contains a colon ':')
-    printf '%s:%s
-' "$USERNAME" "$PASSWORD" | chpasswd
-fi
+# Set the user's password securely using chpasswd.
+# chpasswd uses the system's default password hashing algorithm (yescrypt on modern systems).
+# This is more reliable than manually creating hashes, as it respects PAM configuration.
+# Note: chpasswd will fail if the password contains a colon ':' character.
+echo "$USERNAME:$PASSWORD" | chpasswd
 
 # Set ownership for chroot (home must be root-owned)
 chown root:root "/home/$USERNAME"
@@ -281,6 +292,57 @@ chmod 700 "/home/$USERNAME/uploads"
 # versions are root-owned and not writable by the user
 chown root:backupusers "/home/$USERNAME/versions"
 chmod 755 "/home/$USERNAME/versions"
+
+# Setup Btrfs quota on uploads subvolume
+# Architecture: Set quota directly on the uploads subvolume (level-0 qgroup).
+# This is fast and reliable. The hybrid quota system will check total usage
+# (uploads + snapshots) after each snapshot and block writes if over quota.
+
+echo "Setting up Btrfs quota..."
+
+# Check if quotas are enabled
+if ! btrfs qgroup show /home &>/dev/null; then
+    echo "  ⚠ WARNING: Btrfs quotas not enabled on /home"
+    echo "  Run setup.sh to enable quotas, or manually: btrfs quota enable --simple /home"
+    echo "  Quota tracking will not be available for this user"
+else
+    # Get the uploads subvolume ID
+    UPLOADS_SUBVOL_ID=$(btrfs subvolume show "/home/$USERNAME/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+    
+    if [ -n "$UPLOADS_SUBVOL_ID" ]; then
+        UPLOADS_QGROUP="0/$UPLOADS_SUBVOL_ID"
+        echo "  ✓ Uploads qgroup: $UPLOADS_QGROUP"
+        
+        # Store the uploads qgroup ID and quota limit for reference
+        # This is used by the hybrid quota system and manage_users.sh
+        echo "$UPLOADS_QGROUP" > "/home/$USERNAME/.terminas-qgroup"
+        chown root:root "/home/$USERNAME/.terminas-qgroup"
+        chmod 644 "/home/$USERNAME/.terminas-qgroup"
+        
+        # Store the quota limit (with unit) for hybrid quota checking
+        echo "$QUOTA_STORE" > "/home/$USERNAME/.terminas-quota-limit"
+        chown root:root "/home/$USERNAME/.terminas-quota-limit"
+        chmod 644 "/home/$USERNAME/.terminas-quota-limit"
+        
+        if [ "$QUOTA_BYTES" -gt 0 ]; then
+            # Set quota limit on the uploads subvolume
+            # This is the "hard" limit that prevents writes
+            # The "soft" limit (total including snapshots) is checked after each snapshot
+            if btrfs qgroup limit "$QUOTA_BYTES" "$UPLOADS_QGROUP" /home 2>/dev/null; then
+                echo "  ✓ Set uploads quota limit: ${QUOTA_DISPLAY}"
+            else
+                echo "  ⚠ WARNING: Failed to set quota limit"
+            fi
+        else
+            echo "  Quota: Unlimited (not enforced)"
+        fi
+        
+        echo "  ✓ Quota configuration complete"
+    else
+        echo "  ⚠ WARNING: Could not determine uploads subvolume ID"
+        echo "  Quota tracking will not be available for this user"
+    fi
+fi
 
 # Setup Samba share if requested
 if [ "$ENABLE_SAMBA" = "true" ]; then
@@ -313,6 +375,14 @@ else
     echo "User $USERNAME created successfully."
 fi
 
-echo "Upload subvolume: /home/$USERNAME/uploads (Btrfs subvolume)"
-echo "Versions directory: /home/$USERNAME/versions (read-only Btrfs snapshots)"
+echo ""
+echo "Configuration:"
+echo "  Upload subvolume: /home/$USERNAME/uploads (Btrfs subvolume)"
+echo "  Versions directory: /home/$USERNAME/versions (read-only Btrfs snapshots)"
+if [ "$QUOTA_BYTES" -gt 0 ]; then
+    echo "  Storage quota: ${QUOTA_DISPLAY} (hybrid: uploads hard limit + total soft limit)"
+else
+    echo "  Storage quota: Unlimited"
+fi
+echo ""
 echo "Btrfs snapshots will be created automatically on file uploads via inotify monitoring."

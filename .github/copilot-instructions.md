@@ -53,9 +53,9 @@ terminas/
             └── upload.ps1      # Manual upload with hash checking
 
 Server Runtime Files (created by setup.sh):
-/var/backups/scripts/
-├── monitor_backups.sh          # inotify-based real-time snapshot monitor
-└── cleanup_snapshots.sh        # Retention policy enforcement
+/var/terminas/scripts/
+├── terminas-monitor.sh         # inotify-based real-time snapshot monitor
+└── terminas-cleanup.sh         # Retention policy enforcement
 
 /etc/
 ├── terminas-retention.conf        # Retention policy configuration
@@ -106,6 +106,28 @@ Windows: C:\Program Files\terminas-backup\, C:\ProgramData\terminas-credentials\
 - **GitHub**: Repository hosting at YiannisBourkelis/terminas
 - **Markdown**: Documentation format
 
+## Official Documentation Links
+
+Reference documentation for key technologies used in this project:
+
+### Filesystem & Storage
+### Monitoring & Automation
+- **inotify-tools**: https://github.com/inotify-tools/inotify-tools/wiki
+### SSH & Security
+- **OpenSSH**: https://www.openssh.com/manual.html
+- **SFTP Chroot Configuration**: https://man.openbsd.org/sshd_config#ChrootDirectory
+- **fail2ban**: https://www.fail2ban.org/wiki/index.php/Main_Page
+- **iptables**: https://linux.die.net/man/8/iptables
+
+### File Transfer & Sync
+- **rsync**: https://download.samba.org/pub/rsync/rsync.1
+- **lftp**: https://lftp.yar.ru/lftp-man.html
+- **WinSCP Scripting**: https://winscp.net/eng/docs/scripting
+
+### Scripting
+- **Bash Reference Manual**: https://www.gnu.org/software/bash/manual/bash.html
+- **PowerShell Documentation**: https://docs.microsoft.com/en-us/powershell/
+
 ## Architecture and Design Patterns
 
 ### Security Architecture
@@ -122,10 +144,41 @@ Windows: C:\Program Files\terminas-backup\, C:\ProgramData\terminas-credentials\
 
 ### Snapshot Strategy
 - **Trigger**: inotify events (`close_write`, `moved_to`) - captures complete files only
-- **Method**: rsync with `--link-dest` pointing to previous snapshot
+- **Method**: Btrfs snapshot (not rsync) for instant, space-efficient copies
 - **Timing**: Debounce period (default 10s) to coalesce rapid changes
-- **Storage**: Hardlinks for unchanged files = space-efficient versioning
+- **Storage**: CoW snapshots share data blocks with source until modified
 - **Ownership**: root:backupusers with 755 (readable by user, immutable)
+
+### Btrfs Quota Architecture
+Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-performance enforcement.
+
+**Why Simple Quotas?**
+- Full btrfs qgroup accounting causes severe write performance issues (kernel hangs)
+- Even level-0 qgroups with limits can block writes during back-reference resolution
+- Simple quotas (`btrfs quota enable --simple`) avoid this by attributing all extents to the subvolume that first allocated them
+- All accounting decisions are local to the allocation/freeing operation
+- Reference: https://btrfs.readthedocs.io/en/latest/Qgroups.html#simple-quotas-squota
+
+**Level-0 Qgroup (0/SUBVOL_ID)**: Direct quota on uploads subvolume
+- Created automatically when subvolume is created
+- Quota limit is set directly on uploads subvolume
+- Stored in `/home/<username>/.terminas-qgroup`
+
+**Hybrid Quota Check**: Total usage monitoring after each snapshot
+- After each snapshot, calculates: uploads_size + all_snapshots_size
+- If total > user quota limit, uploads are blocked (subvolume limit set to 1 byte)
+- User can still delete files from uploads
+- Quota is re-checked when:
+  1. User deletes a file from uploads (immediate, via inotify delete event)
+  2. During daily retention cleanup (catches any missed cases)
+- Flag file: `/home/<username>/.terminas-quota-exceeded`
+
+**Configuration Files**:
+- `.terminas-qgroup`: Uploads subvolume qgroup ID (e.g., "0/1234")
+- `.terminas-quota-limit`: Configured quota limit in GB
+- `.terminas-quota-exceeded`: Flag file when over total quota
+
+**Important**: Server setup uses `btrfs quota enable --simple /home` to enable squotas mode.
 
 ### Retention Policy
 **Grandfather-Father-Son (default)**:
@@ -224,6 +277,7 @@ Windows: C:\Program Files\terminas-backup\, C:\ProgramData\terminas-credentials\
 - **Issue**: Using `create` event captures incomplete files during upload
 - **Solution**: Use only `close_write` and `moved_to` events (captures complete files)
 - **Trade-off**: Very fast uploads may complete before close_write triggers
+- **Note**: Current inotify monitor bug: snapshots cannot be deleted until the service is restarted (see docs/ARCHITECTURE_PER_USER_INOTIFY.md)
 
 ### fail2ban and Testing
 - **Issue**: Testing authentication from same IP can trigger bans

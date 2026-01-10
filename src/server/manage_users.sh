@@ -16,9 +16,27 @@ else
     VERSION="unknown"
 fi
 
+# Source common functions
+COMMON_LIB="$SCRIPT_DIR/common.sh"
+if [ -f "$COMMON_LIB" ]; then
+    source "$COMMON_LIB"
+else
+    echo "ERROR: Cannot find common.sh library" >&2
+    exit 1
+fi
+
 set -e
 
 SCRIPT_NAME=$(basename "$0")
+
+# Source delete_user.sh to reuse the reclaim_btrfs_space function
+# This avoids code duplication across multiple scripts (used in cleanup_user, rebuild_user)
+DELETE_USER_SCRIPT="$SCRIPT_DIR/delete_user.sh"
+if [ -f "$DELETE_USER_SCRIPT" ]; then
+    # Source only the reclaim_btrfs_space function definition, not the full script
+    # This extracts the function from delete_user.sh without executing the main script logic
+    eval "$(sed -n '/^reclaim_btrfs_space()/,/^}/p' "$DELETE_USER_SCRIPT")"
+fi
 
 usage() {
     cat <<EOF
@@ -40,6 +58,12 @@ Commands:
     cleanup-all             Cleanup all backup users (keep latest snapshot for each)
     rebuild <username>      Delete all snapshots and create fresh snapshot from uploads
     rebuild-all             Rebuild snapshots for all users (skips users with open files)
+    set-quota <username> <GB|MB>  Set storage quota for user (0 = unlimited)
+    remove-quota <username>    Remove storage quota (unlimited)
+    show-quota <username>      Show quota usage and limit for user
+    show-pending-deletions  Show Btrfs pending deleted subvolumes under /home
+    force-clean             Restart monitor and commit Btrfs deletions (non-blocking)
+    change-password <username>  Change password for user (updates SFTP and Samba if enabled)
     enable-samba <username> Enable Samba (SMB) sharing for an existing user
     disable-samba <username> Disable Samba (SMB) sharing for an existing user
     enable-samba-versions <username>  Enable read-only SMB access to versions (snapshots) directory
@@ -61,6 +85,10 @@ Examples:
     $SCRIPT_NAME cleanup-all
     $SCRIPT_NAME rebuild testuser
     $SCRIPT_NAME rebuild-all
+    $SCRIPT_NAME set-quota testuser 100
+    $SCRIPT_NAME remove-quota testuser
+    $SCRIPT_NAME show-quota testuser
+    $SCRIPT_NAME change-password testuser
     $SCRIPT_NAME enable-samba testuser
     $SCRIPT_NAME enable-samba-versions testuser
     $SCRIPT_NAME disable-samba-versions testuser
@@ -144,6 +172,199 @@ update_samba_includes() {
             fi
         done
     fi
+}
+
+# Show Btrfs pending deletions under /home
+show_pending_deletions() {
+    echo "Checking Btrfs pending deletions for /home..."
+    if ! command -v btrfs >/dev/null 2>&1; then
+        echo "ERROR: btrfs command not found. This server must run on Btrfs."
+        return 1
+    fi
+
+    # btrfs subvolume list -d lists subvolumes pending delete on this filesystem
+    local output
+    output=$(btrfs subvolume list -d /home 2>/dev/null || true)
+    local count
+    if [ -z "$output" ]; then
+        count=0
+    else
+        # Count lines robustly and strip spaces/newlines
+        count=$(printf "%s\n" "$output" | wc -l | tr -cd '0-9')
+        [ -z "$count" ] && count=0
+    fi
+
+    echo "=========================================="
+    echo "Pending deleted subvolumes: $count"
+    echo "Filesystem: /home"
+    echo "=========================================="
+
+    if [ "$count" -eq 0 ]; then
+        echo "No pending deletions. The cleaner has processed all deletions."
+        return 0
+    fi
+
+    # Show up to 50 entries to avoid overwhelming the terminal
+    local limit=50
+    if [ "$count" -le "$limit" ]; then
+        printf "%s\n" "$output"  
+    else
+        printf "%s\n" "$output" | head -n "$limit"
+        # Safe arithmetic: both are integers here
+        local remaining=$((count - limit))
+        echo "... (${remaining} more not shown)"
+    fi
+
+    echo ""
+    echo "Tip: Space is reclaimed asynchronously by the Btrfs cleaner."
+    echo "     You can run: $SCRIPT_NAME force-clean to commit deletions."
+}
+
+# Change password for a user (updates SFTP and Samba if enabled)
+change_password_user() {
+    local username="$1"
+    
+    if [ -z "$username" ]; then
+        echo "Error: Username is required" >&2
+        usage
+        return 1
+    fi
+    
+    # Check if user exists
+    if ! id "$username" &>/dev/null; then
+        echo "Error: User '$username' does not exist" >&2
+        return 1
+    fi
+    
+    # Check if user is a backup user
+    if ! groups "$username" 2>/dev/null | grep -q "backupusers"; then
+        echo "Error: User '$username' is not a backup user" >&2
+        return 1
+    fi
+    
+    echo "========================================="
+    echo "Change Password for: $username"
+    echo "========================================="
+    echo ""
+    
+    # Check which services are enabled
+    local has_samba=false
+    if has_samba_enabled "$username"; then
+        has_samba=true
+        echo "Services enabled: SFTP, Samba (SMB)"
+    else
+        echo "Services enabled: SFTP"
+    fi
+    echo ""
+    
+    # Prompt for new password (with confirmation)
+    local password1 password2
+    while true; do
+        read -s -p "Enter new password (30+ chars, must contain lowercase, uppercase, and numbers): " password1
+        echo ""
+        read -s -p "Confirm new password: " password2
+        echo ""
+        
+        if [ "$password1" != "$password2" ]; then
+            echo "Error: Passwords do not match. Please try again."
+            echo ""
+            continue
+        fi
+        
+        # Validate password strength using shared function
+        if validate_password "$password1" 2>/dev/null; then
+            # Password is valid
+            break
+        else
+            # Show error (validate_password already printed it to stderr)
+            echo ""
+            continue
+        fi
+    done
+    
+    echo ""
+    echo "Updating password..."
+    
+    # Update system password (SFTP)
+    if echo "$username:$password1" | chpasswd 2>/dev/null; then
+        echo "✓ SFTP password updated"
+    else
+        echo "✗ ERROR: Failed to update SFTP password" >&2
+        return 1
+    fi
+    
+    # Update Samba password if enabled
+    if [ "$has_samba" = true ]; then
+        if command -v smbpasswd &>/dev/null; then
+            if echo -e "$password1\n$password1" | smbpasswd -s "$username" 2>/dev/null; then
+                echo "✓ Samba password updated"
+            else
+                echo "✗ ERROR: Failed to update Samba password" >&2
+                echo "  SFTP password was changed but Samba password remains old"
+                echo "  You may need to manually update: smbpasswd -a $username"
+                return 1
+            fi
+        else
+            echo "⚠ WARNING: smbpasswd command not found"
+            echo "  SFTP password was changed but Samba password could not be updated"
+        fi
+    fi
+    
+    echo ""
+    echo "========================================="
+    echo "✓ Password changed successfully"
+    echo "========================================="
+    echo ""
+    echo "The new password is now active for:"
+    if [ "$has_samba" = true ]; then
+        echo "  - SFTP connections"
+        echo "  - Samba (SMB) shares"
+        if has_timemachine_enabled "$username"; then
+            echo "  - Time Machine backups"
+        fi
+    else
+        echo "  - SFTP connections"
+    fi
+    echo ""
+}
+
+# Force a non-blocking cleanup: restart monitor (to drop inotify descriptors)
+# and commit deletion metadata so the kernel cleaner can reclaim space
+force_clean() {
+    echo "Forcing non-blocking cleanup..."
+
+    # Restart monitor service if present
+    if command -v systemctl >/dev/null 2>&1 && [ -f /etc/systemd/system/terminas-monitor.service ]; then
+        if systemctl is-active --quiet terminas-monitor.service; then
+            echo "Restarting terminas-monitor.service..."
+            systemctl restart terminas-monitor.service || true
+        else
+            echo "terminas-monitor.service is not active; attempting to start..."
+            systemctl restart terminas-monitor.service || true
+        fi
+    else
+        echo "Monitor service not found; skipping service restart"
+    fi
+
+    # Show count before sync
+    local before
+    before=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
+    echo "Pending deletions before: $before"
+
+    # Commit metadata; do NOT use 'btrfs subvolume sync' here
+    if btrfs filesystem sync /home >/dev/null 2>&1; then
+        echo "✓ Committed deletions to disk (filesystem sync)"
+    else
+        echo "⚠ WARNING: 'btrfs filesystem sync /home' failed"
+    fi
+
+    # Show count after sync
+    local after
+    after=$(btrfs subvolume list -d /home 2>/dev/null | wc -l || echo 0)
+    echo "Pending deletions after:  $after"
+
+    echo "Note: The Btrfs extent cleaner reclaims space asynchronously."
+    echo "      Counts may decrease over time even if not immediately zero."
 }
 
 # Get list of backup users (members of backupusers group)
@@ -452,27 +673,12 @@ get_last_samba_connection() {
     fi
 }
 
-# Check if Samba is enabled for a user
-has_samba_enabled() {
-    local username="$1"
-    # Check if Samba config file exists for this user
-    [ -f "/etc/samba/smb.conf.d/${username}.conf" ]
-}
-
 # Check if read-only Samba access to versions is enabled for a user
 has_samba_versions_enabled() {
     local username="$1"
     # Check if versions share exists in the user's main Samba config file
     local smb_conf="/etc/samba/smb.conf.d/${username}.conf"
     [ -f "$smb_conf" ] && grep -qF "[${username}-versions]" "$smb_conf" 2>/dev/null
-}
-
-# Check if Time Machine support is enabled for a user
-has_timemachine_enabled() {
-    local username="$1"
-    # Check if timemachine share exists in the user's main Samba config file
-    local smb_conf="/etc/samba/smb.conf.d/${username}.conf"
-    [ -f "$smb_conf" ] && grep -qF "[${username}-timemachine]" "$smb_conf" 2>/dev/null
 }
 
 # Enable Samba sharing for an existing user
@@ -567,7 +773,7 @@ enable_samba() {
    # VFS audit module for tracking SMB file operations
    vfs objects = full_audit
    full_audit:prefix = %u|%I|%m
-   full_audit:success = connect disconnect open close write pwrite mkdir rmdir rename unlink
+   full_audit:success = connect disconnect write pwrite
    full_audit:failure = none
    full_audit:facility = local5
    full_audit:priority = notice
@@ -708,7 +914,7 @@ enable_samba_versions() {
    # VFS audit module for tracking access
    vfs objects = full_audit
    full_audit:prefix = %u|%I|%m|versions
-   full_audit:success = connect disconnect open readdir
+   full_audit:success = connect disconnect
    full_audit:failure = none
    full_audit:facility = local5
    full_audit:priority = notice
@@ -855,7 +1061,7 @@ enable_timemachine() {
    fruit:time machine max size = 0
    # VFS audit module for tracking Time Machine connections
    full_audit:prefix = %u|%I|%m|timemachine
-   full_audit:success = connect disconnect open close write pwrite
+   full_audit:success = connect disconnect write pwrite
    full_audit:failure = connect
    full_audit:facility = local1
    full_audit:priority = notice
@@ -939,6 +1145,381 @@ disable_timemachine() {
     echo ""
     echo "Note: Existing backups in the uploads directory are not deleted."
     echo "      The user can still access files via SFTP or the main SMB share."
+}
+
+# Get quota information for a user
+# Returns: used_bytes|limit_bytes|qgroup_id|total_bytes|is_blocked
+# Uses level-0 qgroup on uploads subvolume for fast quota enforcement
+# Hybrid mode: calculates total usage (uploads + snapshots) separately
+get_user_quota() {
+    local username="$1"
+    local home_dir="/home/$username"
+    
+    # Check if quotas are enabled
+    if ! btrfs qgroup show /home &>/dev/null; then
+        return 1
+    fi
+    
+    # Read user's uploads qgroup from config file (created by create_user.sh)
+    local uploads_qgroup=""
+    if [ -f "$home_dir/.terminas-qgroup" ]; then
+        uploads_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
+    fi
+    
+    # Fallback: try to determine qgroup from uploads subvolume
+    if [ -z "$uploads_qgroup" ] || [[ "$uploads_qgroup" == 1/* ]]; then
+        # Old format was level-1 qgroup (1/UID), need to look up level-0
+        if [ -d "$home_dir/uploads" ]; then
+            local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+            if [ -n "$uploads_subvol_id" ]; then
+                uploads_qgroup="0/$uploads_subvol_id"
+            fi
+        fi
+    fi
+    
+    if [ -z "$uploads_qgroup" ]; then
+        return 1
+    fi
+    
+    # Get usage from uploads subvolume (level-0 qgroup)
+    local qgroup_info=$(btrfs qgroup show --raw /home 2>/dev/null | grep "^${uploads_qgroup}\s" || echo "")
+    
+    if [ -z "$qgroup_info" ]; then
+        return 1
+    fi
+    
+    # Use referenced bytes (column 2)
+    local used_bytes=$(echo "$qgroup_info" | awk '{print $2}')
+    
+    # Get limit from uploads qgroup
+    local limit_info=$(btrfs qgroup show --raw -r /home 2>/dev/null | grep "^${uploads_qgroup}\s" || echo "")
+    local limit_bytes=""
+    
+    if [ -n "$limit_info" ]; then
+        # Column 4 is max_rfer (referenced limit)
+        limit_bytes=$(echo "$limit_info" | awk '{print $4}')
+    fi
+    
+    # Check if limit is set (0, none, or empty means unlimited)
+    if [ "$limit_bytes" = "0" ] || [ "$limit_bytes" = "none" ] || [ -z "$limit_bytes" ]; then
+        limit_bytes="0"
+    fi
+    
+    # Calculate total usage including snapshots (for hybrid quota display)
+    local total_bytes="$used_bytes"
+    if [ -d "$home_dir/versions" ]; then
+        for snap in "$home_dir/versions"/*; do
+            if [ -d "$snap" ]; then
+                local snap_subvol_id=$(btrfs subvolume show "$snap" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+                if [ -n "$snap_subvol_id" ]; then
+                    local snap_qgroup="0/$snap_subvol_id"
+                    local snap_excl=$(btrfs qgroup show --raw -re /home 2>/dev/null | grep "^${snap_qgroup}\s" | awk '{print $2}' || echo "0")
+                    total_bytes=$((total_bytes + snap_excl))
+                fi
+            fi
+        done
+    fi
+    
+    # Check if uploads are blocked (quota exceeded flag)
+    local is_blocked="0"
+    if [ -f "$home_dir/.terminas-quota-exceeded" ]; then
+        is_blocked="1"
+    fi
+    
+    # Return: used_bytes|limit_bytes|qgroup_id|total_bytes|is_blocked
+    echo "${used_bytes}|${limit_bytes}|${uploads_qgroup}|${total_bytes}|${is_blocked}"
+    return 0
+}
+
+# Set quota for a user
+set_quota_user() {
+    local username="$1"
+    local quota_raw="$2"
+    
+    if [ -z "$username" ] || [ -z "$quota_raw" ]; then
+        echo "Usage: $SCRIPT_NAME set-quota <username> <GB|MB>"
+        return 1
+    fi
+    
+    local parsed_quota
+    if ! parsed_quota=$(parse_quota_value "$quota_raw"); then
+        echo "ERROR: Quota must be a positive integer with optional unit (e.g., 50, 50GB, 13000MB)"
+        return 1
+    fi
+
+    local quota_bytes=$(echo "$parsed_quota" | cut -d'|' -f1)
+    local quota_amount=$(echo "$parsed_quota" | cut -d'|' -f2)
+    local quota_unit=$(echo "$parsed_quota" | cut -d'|' -f3)
+    local quota_display=$(echo "$parsed_quota" | cut -d'|' -f4)
+
+    if [ "$quota_amount" -le 0 ] 2>/dev/null; then
+        echo "ERROR: Quota must be greater than zero"
+        return 1
+    fi
+    
+    # Verify user exists
+    if ! id "$username" &>/dev/null; then
+        echo "ERROR: User '$username' does not exist"
+        return 1
+    fi
+    
+    # Check if user is a backup user
+    if ! groups "$username" 2>/dev/null | grep -q "backupusers"; then
+        echo "ERROR: User '$username' is not a backup user"
+        return 1
+    fi
+    
+    # Check if quotas are enabled
+    if ! btrfs qgroup show /home &>/dev/null; then
+        echo "ERROR: Btrfs quotas are not enabled on /home"
+        echo "Run setup.sh to enable quotas, or manually: btrfs quota enable --simple /home"
+        return 1
+    fi
+    
+    local home_dir="/home/$username"
+    
+    # Get uploads subvolume qgroup
+    local uploads_qgroup=""
+    if [ -d "$home_dir/uploads" ]; then
+        local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+        if [ -n "$uploads_subvol_id" ]; then
+            uploads_qgroup="0/$uploads_subvol_id"
+        fi
+    fi
+    
+    if [ -z "$uploads_qgroup" ]; then
+        echo "ERROR: Could not determine uploads subvolume qgroup"
+        echo "Ensure /home/$username/uploads exists and is a Btrfs subvolume"
+        return 1
+    fi
+    
+    # Set quota on uploads subvolume (fast, reliable)
+    if btrfs qgroup limit "$quota_bytes" "$uploads_qgroup" /home 2>/dev/null; then
+        echo "✓ Set quota limit for user '$username': ${quota_display} on uploads ($uploads_qgroup)"
+    else
+        echo "ERROR: Failed to set quota limit on uploads subvolume"
+        return 1
+    fi
+    
+    # Update stored qgroup reference
+    echo "$uploads_qgroup" > "$home_dir/.terminas-qgroup"
+    chown root:root "$home_dir/.terminas-qgroup"
+    chmod 644 "$home_dir/.terminas-qgroup"
+    
+    # Update stored quota limit (for hybrid quota checking)
+    # Store the configured quota with unit (legacy plain number = GB)
+    if [ "$quota_unit" = "MB" ]; then
+        echo "${quota_amount}MB" > "$home_dir/.terminas-quota-limit"
+    else
+        echo "$quota_amount" > "$home_dir/.terminas-quota-limit"
+    fi
+    chown root:root "$home_dir/.terminas-quota-limit"
+    chmod 644 "$home_dir/.terminas-quota-limit"
+    
+    # Clear any quota exceeded flag
+    rm -f "$home_dir/.terminas-quota-exceeded" 2>/dev/null || true
+    
+    # Show current usage
+    local quota_info=$(get_user_quota "$username")
+    if [ -n "$quota_info" ]; then
+        local used_bytes=$(echo "$quota_info" | cut -d'|' -f1)
+        local total_bytes=$(echo "$quota_info" | cut -d'|' -f4)
+        local used_gb=$(printf "%.2f" $(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        local total_gb=$(printf "%.2f" $(echo "scale=2; $total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        local usage_pct=$(printf "%.1f" $(echo "scale=1; ($total_bytes / $quota_bytes) * 100" | bc 2>/dev/null || echo "0"))
+        echo "  Uploads usage: ${used_gb}GB"
+        echo "  Total usage (uploads + snapshots): ${total_gb}GB (${usage_pct}%)"
+    fi
+}
+
+# Remove quota for a user (set to unlimited)
+remove_quota_user() {
+    local username="$1"
+    
+    if [ -z "$username" ]; then
+        echo "Usage: $SCRIPT_NAME remove-quota <username>"
+        return 1
+    fi
+    
+    # Verify user exists
+    if ! id "$username" &>/dev/null; then
+        echo "ERROR: User '$username' does not exist"
+        return 1
+    fi
+    
+    # Check if user is a backup user
+    if ! groups "$username" 2>/dev/null | grep -q "backupusers"; then
+        echo "ERROR: User '$username' is not a backup user"
+        return 1
+    fi
+    
+    # Check if quotas are enabled
+    if ! btrfs qgroup show /home &>/dev/null; then
+        echo "Btrfs quotas are not enabled - user already has unlimited storage"
+        return 0
+    fi
+    
+    local home_dir="/home/$username"
+    
+    # Get uploads subvolume qgroup
+    local uploads_qgroup=""
+    if [ -f "$home_dir/.terminas-qgroup" ]; then
+        uploads_qgroup=$(cat "$home_dir/.terminas-qgroup" 2>/dev/null)
+    fi
+    
+    # Fallback: determine from uploads subvolume
+    if [ -z "$uploads_qgroup" ] || [[ "$uploads_qgroup" == 1/* ]]; then
+        if [ -d "$home_dir/uploads" ]; then
+            local uploads_subvol_id=$(btrfs subvolume show "$home_dir/uploads" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+            if [ -n "$uploads_subvol_id" ]; then
+                uploads_qgroup="0/$uploads_subvol_id"
+            fi
+        fi
+    fi
+    
+    if [ -z "$uploads_qgroup" ]; then
+        echo "ERROR: Could not determine uploads subvolume qgroup"
+        return 1
+    fi
+    
+    # Remove quota from uploads subvolume
+    if btrfs qgroup limit none "$uploads_qgroup" /home 2>/dev/null; then
+        echo "✓ Removed quota limit for user '$username' (unlimited storage)"
+    else
+        echo "ERROR: Failed to remove quota limit"
+        return 1
+    fi
+    
+    # Update config files
+    echo "$uploads_qgroup" > "$home_dir/.terminas-qgroup"
+    echo "0" > "$home_dir/.terminas-quota-limit"
+    rm -f "$home_dir/.terminas-quota-exceeded" 2>/dev/null || true
+}
+
+# Show quota usage and limit for a user
+show_quota_user() {
+    local username="$1"
+    
+    if [ -z "$username" ]; then
+        echo "Usage: $SCRIPT_NAME show-quota <username>"
+        return 1
+    fi
+    
+    # Verify user exists
+    if ! id "$username" &>/dev/null; then
+        echo "ERROR: User '$username' does not exist"
+        return 1
+    fi
+    
+    # Check if user is a backup user
+    if ! groups "$username" 2>/dev/null | grep -q "backupusers"; then
+        echo "ERROR: User '$username' is not a backup user"
+        return 1
+    fi
+    
+    # Check if quotas are enabled
+    if ! btrfs qgroup show /home &>/dev/null; then
+        echo "=========================================="
+        echo "Quota Status for: $username"
+        echo "=========================================="
+        echo ""
+        echo "Quota: Not available (Btrfs quotas not enabled)"
+        echo ""
+        echo "To enable quotas, run: btrfs quota enable --simple /home"
+        return 0
+    fi
+    
+    local quota_info=$(get_user_quota "$username")
+    
+    echo "=========================================="
+    echo "Quota Status for: $username"
+    echo "=========================================="
+    echo ""
+    
+    if [ -z "$quota_info" ]; then
+        echo "Quota: Unlimited (no quota set)"
+        echo ""
+        echo "To set a quota: $SCRIPT_NAME set-quota $username <GB|MB>"
+    else
+        local used_bytes=$(echo "$quota_info" | cut -d'|' -f1)
+        local limit_bytes=$(echo "$quota_info" | cut -d'|' -f2)
+        local qgroup_id=$(echo "$quota_info" | cut -d'|' -f3)
+        local total_bytes=$(echo "$quota_info" | cut -d'|' -f4)
+        local is_blocked=$(echo "$quota_info" | cut -d'|' -f5)
+        
+        # Ensure values are numeric for calculations
+        used_bytes=${used_bytes:-0}
+        limit_bytes=${limit_bytes:-0}
+        total_bytes=${total_bytes:-0}
+        
+        # Validate numeric values
+        [[ ! "$used_bytes" =~ ^[0-9]+$ ]] && used_bytes=0
+        [[ ! "$limit_bytes" =~ ^[0-9]+$ ]] && limit_bytes=0
+        [[ ! "$total_bytes" =~ ^[0-9]+$ ]] && total_bytes=0
+        
+        # Get configured quota limit from file (for hybrid display)
+        local home_dir="/home/$username"
+        local quota_limit_raw="0"
+        local quota_limit_bytes=0
+        local quota_limit_display="0GB"
+        if [ -f "$home_dir/.terminas-quota-limit" ]; then
+            quota_limit_raw=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
+            local parsed_quota_file
+            if parsed_quota_file=$(parse_quota_value "$quota_limit_raw"); then
+                quota_limit_bytes=$(echo "$parsed_quota_file" | cut -d'|' -f1)
+                quota_limit_display=$(echo "$parsed_quota_file" | cut -d'|' -f4)
+            fi
+        fi
+        
+        # Format bytes to GB
+        local used_gb=$(printf "%.2f" $(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        local total_gb=$(printf "%.2f" $(echo "scale=2; $total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+        
+        if [ "$limit_bytes" = "0" ] && [ "$quota_limit_bytes" -eq 0 ]; then
+            echo "Quota: Unlimited"
+            echo "Uploads usage: ${used_gb}GB"
+            echo "Total usage (uploads + snapshots): ${total_gb}GB"
+        else
+            local limit_gb=$(printf "%.2f" $(echo "scale=2; $limit_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+            
+            # Show uploads quota status
+            echo "Uploads Quota:"
+            echo "  Limit: ${limit_gb}GB"
+            echo "  Usage: ${used_gb}GB"
+            
+            # Show total quota status (hybrid)
+            if [ "$quota_limit_bytes" -gt 0 ]; then
+                local total_pct=$(printf "%.1f" $(echo "scale=1; ($total_bytes / $quota_limit_bytes) * 100" | bc 2>/dev/null || echo "0"))
+                local total_available=$((quota_limit_bytes - total_bytes))
+                local total_available_gb=$(printf "%.2f" $(echo "scale=2; $total_available / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
+                
+                echo ""
+                echo "Total Quota (uploads + snapshots):"
+                echo "  Limit: ${quota_limit_display}"
+                echo "  Usage: ${total_gb}GB (${total_pct}%)"
+                
+                if [ "$total_available" -gt 0 ]; then
+                    echo "  Available: ${total_available_gb}GB"
+                fi
+                
+                # Show warning/blocked status
+                if [ "$is_blocked" = "1" ]; then
+                    echo ""
+                    echo "⛔ UPLOADS BLOCKED: Total usage exceeds quota limit!"
+                    echo "   User must delete files from uploads folder to get under quota."
+                    echo "   After next snapshot, uploads will be re-enabled automatically."
+                elif [[ "$total_pct" =~ ^[0-9]+\.?[0-9]*$ ]] && [ $(echo "$total_pct > 90" | bc 2>/dev/null || echo 0) -eq 1 ]; then
+                    echo ""
+                    echo "⚠ WARNING: Total storage usage is above 90%"
+                fi
+            fi
+        fi
+        
+        echo ""
+        echo "Qgroup: $qgroup_id"
+    fi
+    
+    echo ""
 }
 
 # List all backup users with their disk usage
@@ -1364,6 +1945,33 @@ info_user() {
     else
         echo "Disk Usage:"
         echo "  No files uploaded yet (0.00 MB)"
+    fi
+    echo ""
+    
+    # Quota information
+    local quota_info=$(get_user_quota "$username")
+    if [ -n "$quota_info" ]; then
+        local used_bytes=$(echo "$quota_info" | cut -d'|' -f1)
+        local limit_bytes=$(echo "$quota_info" | cut -d'|' -f2)
+        
+        local used_gb=$(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc)
+        
+        if [ "$limit_bytes" = "0" ]; then
+            echo "Storage Quota: Unlimited (${used_gb}GB used)"
+        else
+            local limit_gb=$(echo "scale=2; $limit_bytes / 1024 / 1024 / 1024" | bc)
+            local usage_pct=$(echo "scale=1; ($used_bytes / $limit_bytes) * 100" | bc)
+            local available_bytes=$((limit_bytes - used_bytes))
+            local available_gb=$(echo "scale=2; $available_bytes / 1024 / 1024 / 1024" | bc)
+            
+            echo "Storage Quota: ${used_gb}GB / ${limit_gb}GB (${usage_pct}% used, ${available_gb}GB available)"
+            
+            if [ $(echo "$usage_pct > 90" | bc) -eq 1 ]; then
+                echo "  ⚠ WARNING: Quota usage above 90%"
+            fi
+        fi
+    else
+        echo "Storage Quota: Unlimited (no quota set)"
     fi
     echo ""
     
@@ -1865,6 +2473,11 @@ cleanup_user() {
         fi
     done <<< "$snapshots"
     
+    # Reclaim Btrfs space from deleted subvolumes (reuses function from delete_user.sh)
+    if [ "$removed" -gt 0 ]; then
+        reclaim_btrfs_space "$removed"
+    fi
+    
     # Calculate space after cleanup
     local size_after=$(get_actual_size "$versions_dir")
     local space_freed=$(echo "$size_before - $size_after" | bc)
@@ -2067,6 +2680,11 @@ rebuild_user() {
             done <<< "$snapshots"
             
             echo "Deleted $deleted snapshot(s)"
+            
+            # Reclaim Btrfs space from deleted subvolumes (reuses function from delete_user.sh)
+            if [ "$deleted" -gt 0 ]; then
+                reclaim_btrfs_space "$deleted"
+            fi
         else
             echo "No existing snapshots to delete"
         fi
@@ -2305,6 +2923,30 @@ case "$command" in
     rebuild-all)
         rebuild_all
         ;;
+    set-quota)
+        if [ $# -lt 2 ]; then
+            echo "Error: Username and quota (GB or MB) are required for set-quota command" >&2
+            echo "Usage: $SCRIPT_NAME set-quota <username> <GB|MB>" >&2
+            exit 1
+        fi
+        set_quota_user "$1" "$2"
+        ;;
+    remove-quota)
+        if [ $# -eq 0 ]; then
+            echo "Error: Username is required for remove-quota command" >&2
+            usage
+            exit 1
+        fi
+        remove_quota_user "$1"
+        ;;
+    show-quota)
+        if [ $# -eq 0 ]; then
+            echo "Error: Username is required for show-quota command" >&2
+            usage
+            exit 1
+        fi
+        show_quota_user "$1"
+        ;;
     enable-samba)
         if [ $# -eq 0 ]; then
             echo "Error: Username is required for enable-samba command" >&2
@@ -2352,6 +2994,20 @@ case "$command" in
             exit 1
         fi
         disable_timemachine "$1"
+        ;;
+    show-pending-deletions)
+        show_pending_deletions
+        ;;
+    force-clean)
+        force_clean
+        ;;
+    change-password)
+        if [ $# -eq 0 ]; then
+            echo "Error: Username is required for change-password command" >&2
+            usage
+            exit 1
+        fi
+        change_password_user "$1"
         ;;
     version|--version|-v)
         echo "termiNAS User Management Tool v$VERSION"

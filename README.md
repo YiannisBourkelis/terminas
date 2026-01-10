@@ -552,6 +552,56 @@ sudo ./src/server/manage_users.sh delete <username>
 ```
 Removes the user account and all their data (requires confirmation).
 
+**Change password for a user:**
+```bash
+sudo ./src/server/manage_users.sh change-password <username>
+```
+Changes the password for an existing backup user. Updates authentication for:
+- SFTP connections (always)
+- Samba (SMB) shares (if enabled)
+- Time Machine backups (uses Samba password)
+
+**Features:**
+- Interactive password prompts with confirmation
+- Validates password strength (30+ characters, mixed case, numbers)
+- Automatically detects which services are enabled
+- Atomic updates - rollback warnings if partial failure
+
+**Example session:**
+```
+=========================================
+Change Password for: produser
+=========================================
+
+Services enabled: SFTP, Samba (SMB)
+
+Enter new password (30+ chars, must contain lowercase, uppercase, and numbers): ********
+Confirm new password: ********
+
+Updating password...
+✓ SFTP password updated
+✓ Samba password updated
+
+=========================================
+✓ Password changed successfully
+=========================================
+
+The new password is now active for:
+  - SFTP connections
+  - Samba (SMB) shares
+  - Time Machine backups
+```
+
+**Enable/Disable Samba for existing users:**
+```bash
+# Enable Samba (SMB) sharing
+sudo ./src/server/manage_users.sh enable-samba <username>
+
+# Disable Samba (SMB) sharing
+sudo ./src/server/manage_users.sh disable-samba <username>
+```
+Enables or disables SMB/Samba access for an existing user. When enabled, creates the `username-backup` share for the uploads directory.
+
 **Enable/Disable read-only SMB access to versions (snapshots):**
 ```bash
 # Enable read-only access to snapshots via SMB (for disaster recovery)
@@ -576,6 +626,68 @@ sudo ./src/server/manage_users.sh disable-samba-versions <username>
 3. User connects via `\\server\username-versions` in Windows Explorer
 4. User browses timestamped snapshots and restores needed files
 5. After recovery, admin disables access: `disable-samba-versions username`
+
+**Manage storage quotas:**
+```bash
+# Set quota for user (in GB)
+sudo ./src/server/manage_users.sh set-quota <username> <GB>
+
+# Example: Set 100GB quota
+sudo ./src/server/manage_users.sh set-quota produser 100
+
+# Show quota status
+sudo ./src/server/manage_users.sh show-quota <username>
+
+# Remove quota (unlimited storage)
+sudo ./src/server/manage_users.sh remove-quota <username>
+```
+
+Quota management controls physical disk usage (uploads + all snapshots with Btrfs deduplication). See [Storage Quota Management](#storage-quota-management) section for details.
+
+**Inspect and force Btrfs cleanup:**
+```bash
+# Show pending deleted subvolumes (diagnostic)
+sudo ./src/server/manage_users.sh show-pending-deletions
+
+# Force cleanup (restart monitor + filesystem sync)
+sudo ./src/server/manage_users.sh force-clean
+```
+
+**Understanding Pending Deletions:**
+
+After deleting users or snapshots, you may see "DELETED" entries in `btrfs subvolume list -d`. 
+This is **normal and expected behavior**. The deleted subvolumes continue to consume disk space 
+until the Btrfs cleaner completes the cleanup process.
+
+**Why This Happens:**
+
+The `terminas-monitor.sh` service uses `inotifywait` to watch `/home` for file changes. These 
+inotify watches hold kernel-level references to directory inodes. When a user is deleted, the 
+watches remain active until the monitor service restarts, which delays Btrfs space reclamation.
+
+**When to use `force-clean`:**
+- If you need to immediately reclaim disk space after bulk deletions
+- After deleting many users or cleaning up old snapshots
+- **Caution**: Restarting the monitor service may cause a brief window where file upload 
+  events could be missed. If a user's upload completes exactly when the service restarts, 
+  the snapshot for that upload may not be created. This is rare but should be considered 
+  during active backup periods.
+
+**Example:**
+```bash
+$ sudo ./src/server/manage_users.sh show-pending-deletions
+Pending Btrfs deletions under /home: 3
+
+$ sudo ./src/server/manage_users.sh force-clean
+Pending deletions before: 3
+Restarting monitor service...
+✓ Monitor service restarted
+Committing filesystem metadata...
+✓ Filesystem sync complete
+Pending deletions after: 0
+
+✓ Cleanup complete (non-blocking - kernel cleaner will reclaim space)
+```
 
 #### macOS Time Machine Support
 
@@ -681,14 +793,142 @@ The cleanup script runs daily at 3:00 AM (configurable via `CLEANUP_HOUR` in the
 
 **Manual cleanup:**
 ```bash
-sudo /var/backups/scripts/cleanup_snapshots.sh
+sudo /var/terminas/scripts/terminas-cleanup.sh
 ```
+
+#### Storage Quota Management
+
+termiNAS supports per-user storage quotas using Btrfs qgroups to track physical disk usage across uploads and all snapshots. Quotas are **unlimited by default**.
+
+**Create user with quota:**
+```bash
+# Create user with 100GB quota
+sudo ./src/server/create_user.sh testuser --quota 100
+
+# Create user with unlimited storage (default)
+sudo ./src/server/create_user.sh testuser
+```
+
+**Manage quotas for existing users:**
+```bash
+# Set 50GB quota for user
+sudo ./src/server/manage_users.sh set-quota testuser 50
+
+# Show quota status
+sudo ./src/server/manage_users.sh show-quota testuser
+
+# Remove quota (unlimited)
+sudo ./src/server/manage_users.sh remove-quota testuser
+
+# View quota in user info
+sudo ./src/server/manage_users.sh info testuser
+```
+
+**Configure default quota for new users:**
+
+Edit `/etc/terminas-retention.conf`:
+```bash
+# Default quota for new users (GB, 0 = unlimited)
+DEFAULT_QUOTA_GB=0
+
+# Per-user quota overrides (GB)
+testuser_QUOTA_GB=50
+produser_QUOTA_GB=500
+
+# Quota warning threshold (%)
+QUOTA_WARN_THRESHOLD=90
+```
+
+**How quota enforcement works:**
+
+1. **Tracks physical disk usage** - Measures actual space used on disk (deduplicated via Btrfs CoW)
+2. **Includes uploads + all snapshots** - Total storage for user across all versions
+3. **Blocks snapshots when exceeded** - Monitor service prevents new snapshots if quota is full
+4. **Warns at 90% usage** - Logged to `/var/log/terminas.log` when threshold reached
+5. **Works for all protocols** - Enforced for SFTP, Samba, and Time Machine uploads
+
+**Example quota output:**
+```bash
+$ sudo ./src/server/manage_users.sh show-quota produser
+
+==========================================
+Quota Status for: produser
+==========================================
+
+Quota limit: 100.00GB
+Current usage: 87.34GB (87.3% used, 12.66GB available)
+
+⚠ WARNING: Storage usage is above 90%
+
+Qgroup: 1/258
+```
+
+**Monitor quota in logs:**
+```bash
+# View quota warnings and errors
+sudo tail -f /var/log/terminas.log | grep -i quota
+
+# Example log output:
+# 2025-11-12 14:30:15 WARNING: User produser approaching quota limit (92.1GB / 100.0GB, 92.1%)
+# 2025-11-12 15:45:22 ERROR: User produser is over quota (100.2GB / 100.0GB)
+# 2025-11-12 15:45:22 Snapshot creation blocked - user must free up space
+```
+
+**What happens when quota is exceeded:**
+
+- ❌ **File uploads are blocked** - All write operations fail at filesystem level
+- ❌ **No new snapshots created** until space is freed
+- 📝 All quota events logged to `/var/log/terminas.log`
+- 🔄 Automatic recovery when space becomes available
+- ⚠️ Warning logged at 90% threshold
+
+**How quota enforcement works:**
+
+Btrfs enforces quotas at the **filesystem level** for all protocols automatically:
+
+- **SFTP uploads**: Write fails with "Disk quota exceeded" error
+- **Samba uploads**: Write fails with "No space left on device" error
+- **Time Machine**: Backup fails with disk full error
+- **Snapshots**: Monitor script blocks snapshot creation when over quota
+
+No per-protocol checks needed - Btrfs handles everything uniformly.
+
+**Free up space:**
+```bash
+# Remove old snapshots (keeps only latest)
+sudo ./src/server/manage_users.sh cleanup testuser
+
+# Or adjust retention policy for user
+# Edit /etc/terminas-retention.conf:
+testuser_KEEP_DAILY=3
+testuser_KEEP_WEEKLY=2
+
+# Run cleanup manually (applies retention policy)
+sudo /var/terminas/scripts/terminas-cleanup.sh
+```
+
+**Quota best practices:**
+
+1. **Set realistic limits** based on expected data growth
+2. **Monitor usage regularly** with `show-quota` command
+3. **Configure retention policies** to match quota limits
+4. **Test quota enforcement** before deploying to production
+5. **Alert on 90% threshold** using log monitoring tools
+
+**Technical details:**
+
+- Uses Btrfs qgroups (level 0) on user's home directory subvolume
+- Tracks ALL user data: uploads + all snapshots (versions)
+- Uses **excl** (exclusive bytes) = actual physical disk usage
+- Accounts for Btrfs Copy-on-Write (CoW) deduplication automatically
+- Quota enforced at filesystem level - blocks writes when exceeded
+- Quota checked before each snapshot creation for logging/warnings
 
 #### Monitoring
 
 **View backup activity logs:**
 ```bash
-sudo tail -f /var/log/backup_monitor.log
+sudo tail -f /var/log/terminas.log
 ```
 
 **Check monitor service status:**
@@ -1225,8 +1465,8 @@ To modify or extend the scripts:
 - `src/server/manage_users.sh` - User and snapshot management
 - `src/client/windows/upload.ps1` - Windows PowerShell upload client
 - `src/client/linux/upload.sh` - Linux Bash upload client
-- `/var/backups/scripts/monitor_backups.sh` - Real-time snapshot monitor (created by setup)
-- `/var/backups/scripts/cleanup_snapshots.sh` - Retention policy cleanup (created by setup)
+- `/var/terminas/scripts/terminas-monitor.sh` - Real-time snapshot monitor (created by setup)
+- `/var/terminas/scripts/terminas-cleanup.sh` - Retention policy cleanup (created by setup)
 - `/etc/terminas-retention.conf` - Retention configuration (created by setup)
 
 ## Troubleshooting
@@ -1333,6 +1573,11 @@ Whitelist trusted IPs (edit `/etc/fail2ban/jail.local`):
 ignoreip = 127.0.0.1/8 ::1 192.168.1.0/24 10.0.0.0/8
 ```
 
+**Known issue: Pending Btrfs deletions after snapshot removal**
+
+- The current single inotify watcher keeps kernel references when snapshots are removed (including retention cleanup and user deletions), so Btrfs shows pending deletions and does not reclaim space until the monitor restarts. See [docs/ARCHITECTURE_PER_USER_INOTIFY.md](docs/ARCHITECTURE_PER_USER_INOTIFY.md) for the architecture discussion and proposed fixes.
+- **Workaround**: After snapshots are deleted (retention cleanup or user removal), reclaim space with `sudo ./src/server/manage_users.sh force-clean` (restarts the monitor and commits Btrfs deletions). If the script is not in your current directory, run it from its install path.
+
 **Problem: Snapshots missing files or contain incomplete files**
 
 **This is now fixed!** The new monitor logic creates **periodic snapshots** (every 30 minutes) that automatically exclude in-progress files.
@@ -1355,7 +1600,7 @@ sudo ./src/server/setup.sh
 sudo systemctl restart terminas-monitor.service
 
 # Verify new logic is applied
-sudo grep "Excluding in-progress" /var/backups/scripts/monitor_backups.sh
+sudo grep "Excluding in-progress" /var/terminas/scripts/terminas-monitor.sh
 ```
 
 **Monitor the snapshot process:**
@@ -1445,7 +1690,7 @@ sudo sysctl -p
 
 Manually trigger cleanup:
 ```bash
-sudo /var/backups/scripts/cleanup_snapshots.sh
+sudo /var/terminas/scripts/terminas-cleanup.sh
 ```
 
 Adjust retention policy in `/etc/terminas-retention.conf`:
@@ -1458,4 +1703,119 @@ KEEP_MONTHLY=1
 # Or disable advanced retention
 ENABLE_ADVANCED_RETENTION=false
 RETENTION_DAYS=7
+```
+
+**Problem: Quota not working / "Btrfs quotas are not enabled"**
+
+Check if quotas are enabled:
+```bash
+sudo btrfs qgroup show /home
+```
+
+If you see "ERROR: can't list qgroups: quotas not enabled", enable **simple quotas (squotas)**:
+```bash
+# Enable simple quotas (squota mode)
+sudo btrfs quota disable /home
+sudo btrfs quota enable --simple /home
+
+# Verify
+sudo btrfs qgroup show /home
+```
+
+Or re-run setup script (automatically enables squotas):
+```bash
+sudo ./src/server/setup.sh
+```
+
+**Problem: Quota shows incorrect usage / not updating**
+
+In squota mode, `btrfs quota rescan` is not needed (and returns "Invalid argument"). If accounting looks stale:
+```bash
+# Refresh accounting by toggling squotas
+sudo btrfs quota disable /home
+sudo btrfs quota enable --simple /home
+
+# Then verify
+sudo btrfs qgroup show -r /home | head
+```
+# View updated quota
+sudo ./src/server/manage_users.sh show-quota username
+```
+
+**Problem: User over quota but snapshots still being created**
+
+Check monitor logs for quota enforcement:
+```bash
+# View quota-related log entries
+sudo grep -i quota /var/log/terminas.log | tail -20
+
+# Should see entries like:
+# ERROR: User testuser is over quota (50.2GB / 50.0GB)
+# Snapshot creation blocked - user must free up space
+```
+
+Verify monitor service is running:
+```bash
+sudo systemctl status terminas-monitor.service
+sudo systemctl restart terminas-monitor.service
+```
+
+**Problem: Cannot set quota / "Failed to create qgroup"**
+
+This usually means quotas are not enabled or the subvolume doesn't exist.
+
+Verify user structure:
+```bash
+# Check if home directory is a subvolume (required for quota)
+sudo btrfs subvolume show /home/username
+
+# Check if quotas are enabled
+sudo btrfs qgroup show /home
+
+# Get subvolume ID for home directory
+sudo btrfs subvolume list /home | grep username
+```
+
+**Problem: Quota reached but files still uploading**
+
+With the current implementation, quota blocks file writes at the filesystem level:
+
+- ❌ SFTP/Samba uploads fail with "Disk quota exceeded" error
+- ❌ New snapshots are blocked until space is freed
+- 📸 Existing snapshots remain accessible for restores
+- 🧹 Free space by removing old snapshots: `./manage_users.sh cleanup username`
+
+**Problem: Quota usage doesn't match disk usage**
+
+Quota tracks **exclusive bytes** (physical disk usage), not logical file sizes:
+
+```bash
+# View detailed Btrfs usage
+sudo btrfs filesystem du -s /home/username/
+
+# Compare with quota
+sudo ./src/server/manage_users.sh show-quota username
+
+# Quota uses "excl" (exclusive) which is:
+# - Actual physical disk space consumed
+# - Accounts for Btrfs CoW deduplication between uploads and snapshots
+# - Lower than logical size when data is shared between snapshots
+```
+
+**Test quota functionality:**
+
+Run the comprehensive test suite:
+```bash
+cd /opt/terminas/src/server/tests
+sudo ./test_quota.sh
+
+# This will:
+# - Create test user with 1GB quota
+# - Upload files to test enforcement
+# - Verify quota blocking works
+# - Test quota modification
+# - Clean up test user
+
+# Cleanup test user
+sudo ./test_quota.sh --cleanup-only
 ```
