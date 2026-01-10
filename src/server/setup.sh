@@ -562,17 +562,17 @@ echo "\$(date '+%F %T') ========================================" >> "\$LOG"
 
 # Format bytes into a human-friendly quota string (prefers GB, falls back to MB).
 format_quota_display() {
-    local bytes="$1"
-    if [ -z "$bytes" ] || ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+    local bytes="\$1"
+    if [ -z "\$bytes" ] || ! [[ "\$bytes" =~ ^[0-9]+$ ]]; then
         echo "0GB"
         return 0
     fi
-    local gb=$(echo "scale=2; $bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
-    if echo "$gb >= 0.01" | bc -l >/dev/null 2>&1 && [ "$(echo "$gb >= 0.01" | bc)" -eq 1 ]; then
-        printf "%.2fGB" "$gb"
+    local gb=\$(echo "scale=2; \$bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+    if echo "\$gb >= 0.01" | bc -l >/dev/null 2>&1 && [ "\$(echo "\$gb >= 0.01" | bc)" -eq 1 ]; then
+        printf "%.2fGB" "\$gb"
     else
-        local mb=$(echo "scale=0; $bytes / 1024 / 1024" | bc 2>/dev/null || echo "0")
-        printf "%sMB" "$mb"
+        local mb=\$(echo "scale=0; \$bytes / 1024 / 1024" | bc 2>/dev/null || echo "0")
+        printf "%sMB" "\$mb"
     fi
 }
 
@@ -581,24 +581,24 @@ format_quota_display() {
 # - default_unit: unit to assume when no suffix is provided (GB by default). Accepts GB, MB, or B.
 # Returns: "bytes|amount|unit|display" on success; non-zero on failure.
 parse_quota_value() {
-    local raw="$1"
-    local default_unit="${2:-GB}"
+    local raw="\$1"
+    local default_unit="\${2:-GB}"
 
-    local normalized="${raw,,}"
-    normalized="${normalized// /}"
+    local normalized="\${raw,,}"
+    normalized="\${normalized// /}"
 
     local amount=""
     local unit=""
 
-    if [[ "$normalized" =~ ^([0-9]+)mb$ ]]; then
-        amount="${BASH_REMATCH[1]}"
+    if [[ "\$normalized" =~ ^([0-9]+)mb$ ]]; then
+        amount="\${BASH_REMATCH[1]}"
         unit="MB"
-    elif [[ "$normalized" =~ ^([0-9]+)gb$ ]]; then
-        amount="${BASH_REMATCH[1]}"
+    elif [[ "\$normalized" =~ ^([0-9]+)gb$ ]]; then
+        amount="\${BASH_REMATCH[1]}"
         unit="GB"
-    elif [[ "$normalized" =~ ^([0-9]+)$ ]]; then
-        amount="$normalized"
-        case "${default_unit^^}" in
+    elif [[ "\$normalized" =~ ^([0-9]+)$ ]]; then
+        amount="\$normalized"
+        case "\${default_unit^^}" in
             MB) unit="MB" ;;
             B) unit="B" ;;
             *) unit="GB" ;;
@@ -608,14 +608,14 @@ parse_quota_value() {
     fi
 
     local bytes=0
-    case "$unit" in
-        MB) bytes=$((amount * 1024 * 1024)) ;;
-        B)  bytes=$amount ;;
-        *)  bytes=$((amount * 1024 * 1024 * 1024)) ;;
+    case "\$unit" in
+        MB) bytes=\$((amount * 1024 * 1024)) ;;
+        B)  bytes=\$amount ;;
+        *)  bytes=\$((amount * 1024 * 1024 * 1024)) ;;
     esac
 
-    local display="$(format_quota_display "$bytes")"
-    echo "${bytes}|${amount}|${unit}|${display}"
+    local display="\$(format_quota_display "\$bytes")"
+    echo "\${bytes}|\${amount}|\${unit}|\${display}"
     return 0
 }
 
