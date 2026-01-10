@@ -167,19 +167,24 @@ else
     print_result "PASS" "Qgroup data is consistent"
 fi
 
-# Wait for any ongoing quota rescan to complete (critical for quota enforcement)
-echo "Checking for ongoing quota rescan..."
-rescan_status=$(btrfs quota rescan -s /home 2>&1)
-if echo "$rescan_status" | grep -qi "running\|progress"; then
-    echo "Quota rescan is in progress. Waiting for completion..."
-    echo "(This may take a while for large filesystems)"
-    btrfs quota rescan -w /home 2>/dev/null || true
-    print_result "PASS" "Quota rescan completed"
-elif echo "$rescan_status" | grep -qi "no rescan"; then
-    print_result "PASS" "No quota rescan in progress"
+# Check quota mode (squotas vs full qgroups)
+# With squotas, rescan returns "Invalid argument" because it's not needed
+echo "Checking quota mode..."
+rescan_result=$(btrfs quota rescan /home 2>&1)
+if echo "$rescan_result" | grep -qi "Invalid argument"; then
+    print_result "PASS" "Using simple quotas (squotas) - fast mode"
+    USING_SQUOTAS=true
 else
-    # Unknown status, continue anyway
-    print_result "INFO" "Quota rescan status: $rescan_status"
+    # Full qgroups mode - wait for any rescan to complete
+    USING_SQUOTAS=false
+    rescan_status=$(btrfs quota rescan -s /home 2>&1)
+    if echo "$rescan_status" | grep -qi "running\|progress"; then
+        echo "Quota rescan is in progress. Waiting for completion..."
+        btrfs quota rescan -w /home 2>/dev/null || true
+        print_result "PASS" "Quota rescan completed"
+    else
+        print_result "INFO" "Using full qgroups mode"
+    fi
 fi
 
 if [ ! -f "$SCRIPT_DIR/create_user.sh" ]; then
@@ -214,16 +219,10 @@ else
     exit 1
 fi
 
-# Wait for any quota rescan triggered by user creation to complete
-echo "Waiting for quota rescan to complete (if any)..."
-rescan_status=$(btrfs quota rescan -s /home 2>&1)
-if echo "$rescan_status" | grep -qi "running\|progress"; then
-    echo "  Quota rescan in progress, waiting..."
-    btrfs quota rescan -w /home 2>/dev/null || true
-    print_result "PASS" "Quota rescan completed"
-else
-    print_result "INFO" "No rescan in progress"
-fi
+# Sync to ensure quota accounting is up to date
+echo "Syncing filesystem..."
+sync
+print_result "PASS" "Filesystem synced"
 
 # TEST 2: Upload 500MB file (should succeed)
 print_header "TEST 2/4: Upload 500MB File (Should Succeed)"
@@ -283,9 +282,10 @@ else
     exit 1
 fi
 
-# Rescan quota and show usage
+# Sync to update quota accounting (required for squotas)
 echo "Updating quota accounting..."
-btrfs quota rescan -w /home 2>/dev/null || true
+sync
+sleep 1  # Brief pause to ensure accounting is updated
 
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" 2>&1 | head -20
 echo ""
