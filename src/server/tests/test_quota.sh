@@ -261,7 +261,7 @@ else
     exit 1
 fi
 
-if grep -q "Quota limit: ${TEST_QUOTA_GB}" /tmp/quota_output.txt; then
+if grep -q "Limit: ${TEST_QUOTA_GB}" /tmp/quota_output.txt; then
     print_result "PASS" "Quota limit is correctly set to ${TEST_QUOTA_GB}GB"
 else
     print_result "FAIL" "Quota limit not set correctly"
@@ -270,7 +270,7 @@ else
     exit 1
 fi
 
-if grep -qE "Current usage: 0(\.00)?GB" /tmp/quota_output.txt; then
+if grep -qE "Usage: 0(\.00)?GB" /tmp/quota_output.txt; then
     print_result "PASS" "Initial quota usage is 0GB"
 else
     print_result "FAIL" "Initial quota usage is not 0GB"
