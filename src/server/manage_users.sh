@@ -58,7 +58,7 @@ Commands:
     cleanup-all             Cleanup all backup users (keep latest snapshot for each)
     rebuild <username>      Delete all snapshots and create fresh snapshot from uploads
     rebuild-all             Rebuild snapshots for all users (skips users with open files)
-    set-quota <username> <GB>  Set storage quota for user (0 = unlimited)
+    set-quota <username> <GB|MB>  Set storage quota for user (0 = unlimited)
     remove-quota <username>    Remove storage quota (unlimited)
     show-quota <username>      Show quota usage and limit for user
     show-pending-deletions  Show Btrfs pending deleted subvolumes under /home
@@ -1234,15 +1234,26 @@ get_user_quota() {
 # Set quota for a user
 set_quota_user() {
     local username="$1"
-    local quota_gb="$2"
+    local quota_raw="$2"
     
-    if [ -z "$username" ] || [ -z "$quota_gb" ]; then
-        echo "Usage: $SCRIPT_NAME set-quota <username> <GB>"
+    if [ -z "$username" ] || [ -z "$quota_raw" ]; then
+        echo "Usage: $SCRIPT_NAME set-quota <username> <GB|MB>"
         return 1
     fi
     
-    if ! [[ "$quota_gb" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: Quota must be a positive integer (GB)"
+    local parsed_quota
+    if ! parsed_quota=$(parse_quota_value "$quota_raw"); then
+        echo "ERROR: Quota must be a positive integer with optional unit (e.g., 50, 50GB, 13000MB)"
+        return 1
+    fi
+
+    local quota_bytes=$(echo "$parsed_quota" | cut -d'|' -f1)
+    local quota_amount=$(echo "$parsed_quota" | cut -d'|' -f2)
+    local quota_unit=$(echo "$parsed_quota" | cut -d'|' -f3)
+    local quota_display=$(echo "$parsed_quota" | cut -d'|' -f4)
+
+    if [ "$quota_amount" -le 0 ] 2>/dev/null; then
+        echo "ERROR: Quota must be greater than zero"
         return 1
     fi
     
@@ -1283,10 +1294,8 @@ set_quota_user() {
     fi
     
     # Set quota on uploads subvolume (fast, reliable)
-    local quota_bytes=$((quota_gb * 1024 * 1024 * 1024))
-    
     if btrfs qgroup limit "$quota_bytes" "$uploads_qgroup" /home 2>/dev/null; then
-        echo "✓ Set quota limit for user '$username': ${quota_gb}GB on uploads ($uploads_qgroup)"
+        echo "✓ Set quota limit for user '$username': ${quota_display} on uploads ($uploads_qgroup)"
     else
         echo "ERROR: Failed to set quota limit on uploads subvolume"
         return 1
@@ -1298,7 +1307,12 @@ set_quota_user() {
     chmod 644 "$home_dir/.terminas-qgroup"
     
     # Update stored quota limit (for hybrid quota checking)
-    echo "$quota_gb" > "$home_dir/.terminas-quota-limit"
+    # Store the configured quota with unit (legacy plain number = GB)
+    if [ "$quota_unit" = "MB" ]; then
+        echo "${quota_amount}MB" > "$home_dir/.terminas-quota-limit"
+    else
+        echo "$quota_amount" > "$home_dir/.terminas-quota-limit"
+    fi
     chown root:root "$home_dir/.terminas-quota-limit"
     chmod 644 "$home_dir/.terminas-quota-limit"
     
@@ -1425,7 +1439,7 @@ show_quota_user() {
     if [ -z "$quota_info" ]; then
         echo "Quota: Unlimited (no quota set)"
         echo ""
-        echo "To set a quota: $SCRIPT_NAME set-quota $username <GB>"
+        echo "To set a quota: $SCRIPT_NAME set-quota $username <GB|MB>"
     else
         local used_bytes=$(echo "$quota_info" | cut -d'|' -f1)
         local limit_bytes=$(echo "$quota_info" | cut -d'|' -f2)
@@ -1445,16 +1459,23 @@ show_quota_user() {
         
         # Get configured quota limit from file (for hybrid display)
         local home_dir="/home/$username"
-        local quota_limit_gb="0"
+        local quota_limit_raw="0"
+        local quota_limit_bytes=0
+        local quota_limit_display="0GB"
         if [ -f "$home_dir/.terminas-quota-limit" ]; then
-            quota_limit_gb=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
+            quota_limit_raw=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
+            local parsed_quota_file
+            if parsed_quota_file=$(parse_quota_value "$quota_limit_raw"); then
+                quota_limit_bytes=$(echo "$parsed_quota_file" | cut -d'|' -f1)
+                quota_limit_display=$(echo "$parsed_quota_file" | cut -d'|' -f4)
+            fi
         fi
         
         # Format bytes to GB
         local used_gb=$(printf "%.2f" $(echo "scale=2; $used_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
         local total_gb=$(printf "%.2f" $(echo "scale=2; $total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
         
-        if [ "$limit_bytes" = "0" ] && [ "$quota_limit_gb" = "0" ]; then
+        if [ "$limit_bytes" = "0" ] && [ "$quota_limit_bytes" -eq 0 ]; then
             echo "Quota: Unlimited"
             echo "Uploads usage: ${used_gb}GB"
             echo "Total usage (uploads + snapshots): ${total_gb}GB"
@@ -1467,15 +1488,14 @@ show_quota_user() {
             echo "  Usage: ${used_gb}GB"
             
             # Show total quota status (hybrid)
-            if [ "$quota_limit_gb" != "0" ]; then
-                local quota_limit_bytes=$((quota_limit_gb * 1024 * 1024 * 1024))
+            if [ "$quota_limit_bytes" -gt 0 ]; then
                 local total_pct=$(printf "%.1f" $(echo "scale=1; ($total_bytes / $quota_limit_bytes) * 100" | bc 2>/dev/null || echo "0"))
                 local total_available=$((quota_limit_bytes - total_bytes))
                 local total_available_gb=$(printf "%.2f" $(echo "scale=2; $total_available / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0"))
                 
                 echo ""
                 echo "Total Quota (uploads + snapshots):"
-                echo "  Limit: ${quota_limit_gb}GB"
+                echo "  Limit: ${quota_limit_display}"
                 echo "  Usage: ${total_gb}GB (${total_pct}%)"
                 
                 if [ "$total_available" -gt 0 ]; then
@@ -2905,8 +2925,8 @@ case "$command" in
         ;;
     set-quota)
         if [ $# -lt 2 ]; then
-            echo "Error: Username and quota (GB) are required for set-quota command" >&2
-            echo "Usage: $SCRIPT_NAME set-quota <username> <GB>" >&2
+            echo "Error: Username and quota (GB or MB) are required for set-quota command" >&2
+            echo "Usage: $SCRIPT_NAME set-quota <username> <GB|MB>" >&2
             exit 1
         fi
         set_quota_user "$1" "$2"

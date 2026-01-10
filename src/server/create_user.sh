@@ -136,13 +136,13 @@ EOF
 
 # Parse command line arguments
 if [ $# -lt 1 ]; then
-    echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine] [-q|--quota <GB>]"
+    echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine] [-q|--quota <GB|MB>]"
     echo ""
     echo "Options:"
     echo "  -p, --password     Manually specify password (must be 30+ chars with lowercase, uppercase, and numbers)"
     echo "  -s, --samba        Enable Samba (SMB) sharing for uploads directory"
     echo "  -t, --timemachine  Enable macOS Time Machine support (requires --samba)"
-    echo "  -q, --quota        Set storage quota in GB (0 = unlimited, default from /etc/terminas-retention.conf)"
+    echo "  -q, --quota        Set storage quota (default unit GB; append MB for megabytes, 0 = unlimited, default from /etc/terminas-retention.conf)"
     echo ""
     echo "If no password is provided, a secure 64-character random password will be generated."
     echo "Samba sharing allows other applications to use the uploads directory as a network share."
@@ -152,10 +152,13 @@ if [ $# -lt 1 ]; then
 fi
 
 USERNAME=$1
-PASSWORD=""
+PASSWORD_PROVIDED=false
 ENABLE_SAMBA=false
 ENABLE_TIMEMACHINE=false
-QUOTA_GB=""
+QUOTA_RAW=""
+QUOTA_BYTES=0
+QUOTA_DISPLAY="0GB"
+QUOTA_STORE="0"
 
 # Parse optional parameters
 shift
@@ -179,19 +182,15 @@ while [ $# -gt 0 ]; do
             ;;
         -q|--quota)
             if [ -z "${2:-}" ]; then
-                echo "ERROR: --quota requires a value (quota in GB)"
+                echo "ERROR: --quota requires a value (e.g., 50, 50GB, 13000MB)"
                 exit 1
             fi
-            if ! [[ "$2" =~ ^[0-9]+$ ]]; then
-                echo "ERROR: --quota must be a positive integer (GB)"
-                exit 1
-            fi
-            QUOTA_GB="$2"
+            QUOTA_RAW="$2"
             shift 2
             ;;
         *)
             echo "ERROR: Unknown parameter: $1"
-            echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine] [-q|--quota <GB>]"
+            echo "Usage: $0 <username> [-p|--password <password>] [-s|--samba] [-t|--timemachine] [-q|--quota <GB|MB>]"
             exit 1
             ;;
     esac
@@ -221,6 +220,41 @@ else
         exit 1
     fi
     echo "Using provided password (validated: 30+ chars, lowercase, uppercase, numbers)"
+fi
+
+# Resolve and validate quota before creating any system state
+if [ -z "$QUOTA_RAW" ]; then
+    # Load default quota from config file (legacy GB field)
+    if [ -f /etc/terminas-retention.conf ]; then
+        source /etc/terminas-retention.conf
+        QUOTA_RAW="${DEFAULT_QUOTA_GB:-0}"
+    else
+        QUOTA_RAW=0
+    fi
+fi
+
+QUOTA_BYTES=0
+QUOTA_DISPLAY="0GB"
+QUOTA_STORE="0"
+QUOTA_UNIT="GB"
+if quota_parsed=$(parse_quota_value "$QUOTA_RAW"); then
+    QUOTA_BYTES=$(echo "$quota_parsed" | cut -d'|' -f1)
+    QUOTA_AMOUNT=$(echo "$quota_parsed" | cut -d'|' -f2)
+    QUOTA_UNIT=$(echo "$quota_parsed" | cut -d'|' -f3)
+    QUOTA_DISPLAY=$(echo "$quota_parsed" | cut -d'|' -f4)
+    # Enforce non-negative integer quota (0 allowed for unlimited)
+    if ! [[ "$QUOTA_AMOUNT" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Quota must be a positive integer with optional GB/MB suffix"
+        exit 1
+    fi
+    if [ "$QUOTA_UNIT" = "MB" ]; then
+        QUOTA_STORE="${QUOTA_AMOUNT}MB"
+    else
+        QUOTA_STORE="$QUOTA_AMOUNT"
+    fi
+else
+    echo "ERROR: Invalid quota value '$QUOTA_RAW' (expected integer with optional GB/MB suffix)"
+    exit 1
 fi
 
 echo "Creating user $USERNAME with password: $PASSWORD"
@@ -259,17 +293,6 @@ chmod 700 "/home/$USERNAME/uploads"
 chown root:backupusers "/home/$USERNAME/versions"
 chmod 755 "/home/$USERNAME/versions"
 
-# Setup Btrfs quota for user (if requested or configured)
-if [ -z "$QUOTA_GB" ]; then
-    # Load default quota from config file
-    if [ -f /etc/terminas-retention.conf ]; then
-        source /etc/terminas-retention.conf
-        QUOTA_GB="${DEFAULT_QUOTA_GB:-0}"
-    else
-        QUOTA_GB=0
-    fi
-fi
-
 # Setup Btrfs quota on uploads subvolume
 # Architecture: Set quota directly on the uploads subvolume (level-0 qgroup).
 # This is fast and reliable. The hybrid quota system will check total usage
@@ -296,19 +319,17 @@ else
         chown root:root "/home/$USERNAME/.terminas-qgroup"
         chmod 644 "/home/$USERNAME/.terminas-qgroup"
         
-        # Store the quota limit (in GB) for hybrid quota checking
-        echo "$QUOTA_GB" > "/home/$USERNAME/.terminas-quota-limit"
+        # Store the quota limit (with unit) for hybrid quota checking
+        echo "$QUOTA_STORE" > "/home/$USERNAME/.terminas-quota-limit"
         chown root:root "/home/$USERNAME/.terminas-quota-limit"
         chmod 644 "/home/$USERNAME/.terminas-quota-limit"
         
-        if [ "$QUOTA_GB" -gt 0 ]; then
-            QUOTA_BYTES=$((QUOTA_GB * 1024 * 1024 * 1024))
-            
+        if [ "$QUOTA_BYTES" -gt 0 ]; then
             # Set quota limit on the uploads subvolume
             # This is the "hard" limit that prevents writes
             # The "soft" limit (total including snapshots) is checked after each snapshot
             if btrfs qgroup limit "$QUOTA_BYTES" "$UPLOADS_QGROUP" /home 2>/dev/null; then
-                echo "  ✓ Set uploads quota limit: ${QUOTA_GB}GB"
+                echo "  ✓ Set uploads quota limit: ${QUOTA_DISPLAY}"
             else
                 echo "  ⚠ WARNING: Failed to set quota limit"
             fi
@@ -358,8 +379,8 @@ echo ""
 echo "Configuration:"
 echo "  Upload subvolume: /home/$USERNAME/uploads (Btrfs subvolume)"
 echo "  Versions directory: /home/$USERNAME/versions (read-only Btrfs snapshots)"
-if [ "$QUOTA_GB" -gt 0 ]; then
-    echo "  Storage quota: ${QUOTA_GB}GB (hybrid: uploads hard limit + total soft limit)"
+if [ "$QUOTA_BYTES" -gt 0 ]; then
+    echo "  Storage quota: ${QUOTA_DISPLAY} (hybrid: uploads hard limit + total soft limit)"
 else
     echo "  Storage quota: Unlimited"
 fi

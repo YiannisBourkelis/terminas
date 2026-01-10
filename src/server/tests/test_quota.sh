@@ -238,7 +238,7 @@ if [ -f "/home/$TEST_USER/.terminas-qgroup" ]; then
     # Check quota limit file
     if [ -f "/home/$TEST_USER/.terminas-quota-limit" ]; then
         QUOTA_LIMIT=$(cat "/home/$TEST_USER/.terminas-quota-limit")
-        print_result "PASS" "Quota limit config exists: ${QUOTA_LIMIT}GB"
+        print_result "PASS" "Quota limit config exists: ${QUOTA_LIMIT}"
     else
         print_result "INFO" "No quota limit config file found"
     fi

@@ -560,6 +560,65 @@ echo "\$(date '+%F %T') Version: $TERMINAS_VERSION" >> "\$LOG"
 echo "\$(date '+%F %T') Commit: $TERMINAS_COMMIT" >> "\$LOG"
 echo "\$(date '+%F %T') ========================================" >> "\$LOG"
 
+# Format bytes into a human-friendly quota string (prefers GB, falls back to MB).
+format_quota_display() {
+    local bytes="$1"
+    if [ -z "$bytes" ] || ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "0GB"
+        return 0
+    fi
+    local gb=$(echo "scale=2; $bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+    if echo "$gb >= 0.01" | bc -l >/dev/null 2>&1 && [ "$(echo "$gb >= 0.01" | bc)" -eq 1 ]; then
+        printf "%.2fGB" "$gb"
+    else
+        local mb=$(echo "scale=0; $bytes / 1024 / 1024" | bc 2>/dev/null || echo "0")
+        printf "%sMB" "$mb"
+    fi
+}
+
+# Parse quota values with optional unit suffix.
+# - raw: input string (e.g., "50", "50GB", "13000MB")
+# - default_unit: unit to assume when no suffix is provided (GB by default). Accepts GB, MB, or B.
+# Returns: "bytes|amount|unit|display" on success; non-zero on failure.
+parse_quota_value() {
+    local raw="$1"
+    local default_unit="${2:-GB}"
+
+    local normalized="${raw,,}"
+    normalized="${normalized// /}"
+
+    local amount=""
+    local unit=""
+
+    if [[ "$normalized" =~ ^([0-9]+)mb$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="MB"
+    elif [[ "$normalized" =~ ^([0-9]+)gb$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="GB"
+    elif [[ "$normalized" =~ ^([0-9]+)$ ]]; then
+        amount="$normalized"
+        case "${default_unit^^}" in
+            MB) unit="MB" ;;
+            B) unit="B" ;;
+            *) unit="GB" ;;
+        esac
+    else
+        return 1
+    fi
+
+    local bytes=0
+    case "$unit" in
+        MB) bytes=$((amount * 1024 * 1024)) ;;
+        B)  bytes=$amount ;;
+        *)  bytes=$((amount * 1024 * 1024 * 1024)) ;;
+    esac
+
+    local display="$(format_quota_display "$bytes")"
+    echo "${bytes}|${amount}|${unit}|${display}"
+    return 0
+}
+
 # Watch /home recursively and react to close_write events
 # Exclude /home/<user>/versions/ directories - no need to monitor snapshot directories
 # since users only upload to /home/<user>/uploads/
@@ -610,9 +669,14 @@ while read path event; do
             echo "\$(date '+%F %T') Delete event for blocked user \$user - checking quota" >> "\$LOG"
             
             # Get configured quota limit
-            quota_limit_gb=\$(cat "/home/\$user/.terminas-quota-limit" 2>/dev/null || echo "0")
-            if [ "\$quota_limit_gb" != "0" ]; then
-                quota_limit_bytes=\$((quota_limit_gb * 1024 * 1024 * 1024))
+            quota_limit_raw=\$(cat "/home/\$user/.terminas-quota-limit" 2>/dev/null || echo "0")
+            quota_limit_bytes=0
+            quota_limit_display="0GB"
+            if quota_parsed=\$(parse_quota_value "\$quota_limit_raw"); then
+                quota_limit_bytes=\$(echo "\$quota_parsed" | cut -d'|' -f1)
+                quota_limit_display=\$(echo "\$quota_parsed" | cut -d'|' -f4)
+            fi
+            if [ "\$quota_limit_bytes" -gt 0 ]; then
                 
                 # Calculate total exclusive usage
                 total_exclusive_bytes=0
@@ -647,10 +711,10 @@ while read path event; do
                     if [ -n "\$uploads_qgroup" ]; then
                         btrfs qgroup limit "\$quota_limit_bytes" "\$uploads_qgroup" /home 2>/dev/null || true
                         rm -f "/home/\$user/.terminas-quota-exceeded" 2>/dev/null || true
-                        echo "\$(date '+%F %T') User \$user: Quota restored - now at \${total_gb}GB / \${quota_limit_gb}GB (uploads unblocked)" >> "\$LOG"
+                        echo "\$(date '+%F %T') User \$user: Quota restored - now at \${total_gb}GB / \${quota_limit_display} (uploads unblocked)" >> "\$LOG"
                     fi
                 else
-                    echo "\$(date '+%F %T') User \$user: Still over quota at \${total_gb}GB / \${quota_limit_gb}GB" >> "\$LOG"
+                    echo "\$(date '+%F %T') User \$user: Still over quota at \${total_gb}GB / \${quota_limit_display}" >> "\$LOG"
                 fi
             fi
         fi
@@ -773,8 +837,11 @@ while read path event; do
                     # Check if quota exceeded flag is set (from hybrid quota check)
                     if [ -f "/home/\$user/.terminas-quota-exceeded" ]; then
                         quota_limit_file="/home/\$user/.terminas-quota-limit"
-                        quota_limit_gb=\$(cat "\$quota_limit_file" 2>/dev/null || echo "?")
-                        echo "\$(date '+%F %T') User \$user is over total quota (\${quota_limit_gb}GB limit) - snapshot still created" >> "\$LOG"
+                        quota_limit_display="?GB"
+                        if quota_parsed=\$(parse_quota_value "\$(cat "\$quota_limit_file" 2>/dev/null || echo "0")"); then
+                            quota_limit_display=\$(echo "\$quota_parsed" | cut -d'|' -f4)
+                        fi
+                        echo "\$(date '+%F %T') User \$user is over total quota (\${quota_limit_display} limit) - snapshot still created" >> "\$LOG"
                     fi
                     
                     # Check if limit is set on uploads
@@ -852,9 +919,13 @@ while read path event; do
             # If over quota, block new uploads by setting uploads subvolume limit to 0
             quota_limit_file="/home/\$user/.terminas-quota-limit"
             if [ -f "\$quota_limit_file" ]; then
-                quota_limit_gb=\$(cat "\$quota_limit_file" 2>/dev/null || echo "0")
-                if [ "\$quota_limit_gb" -gt 0 ] 2>/dev/null; then
-                    quota_limit_bytes=\$((quota_limit_gb * 1024 * 1024 * 1024))
+                quota_limit_display="0GB"
+                quota_limit_bytes=0
+                if quota_parsed=\$(parse_quota_value "\$(cat "\$quota_limit_file" 2>/dev/null || echo "0")"); then
+                    quota_limit_bytes=\$(echo "\$quota_parsed" | cut -d'|' -f1)
+                    quota_limit_display=\$(echo "\$quota_parsed" | cut -d'|' -f4)
+                fi
+                if [ "\$quota_limit_bytes" -gt 0 ] 2>/dev/null; then
                     
                     # Calculate total exclusive usage for this user (uploads + all snapshots)
                     total_exclusive_bytes=0
@@ -890,7 +961,7 @@ while read path event; do
                         # OVER QUOTA: Block new uploads by setting uploads limit to 1 byte
                         if [ -n "\$uploads_qgroup" ]; then
                             btrfs qgroup limit 1 "\$uploads_qgroup" /home 2>/dev/null || true
-                            echo "\$(date '+%F %T') QUOTA EXCEEDED: User \$user is over quota (\${total_gb}GB / \${quota_limit_gb}GB) - uploads blocked" >> "\$LOG"
+                            echo "\$(date '+%F %T') QUOTA EXCEEDED: User \$user is over quota (\${total_gb}GB / \${quota_limit_display}) - uploads blocked" >> "\$LOG"
                             
                             # Create a flag file so user knows they're over quota
                             echo "\$total_exclusive_bytes" > "/home/\$user/.terminas-quota-exceeded"
@@ -903,7 +974,7 @@ while read path event; do
                             # Remove any block (restore full quota on uploads)
                             btrfs qgroup limit "\$quota_limit_bytes" "\$uploads_qgroup" /home 2>/dev/null || true
                             rm -f "/home/\$user/.terminas-quota-exceeded" 2>/dev/null || true
-                            echo "\$(date '+%F %T') Quota check OK: User \$user at \${total_gb}GB / \${quota_limit_gb}GB" >> "\$LOG"
+                            echo "\$(date '+%F %T') Quota check OK: User \$user at \${total_gb}GB / \${quota_limit_display}" >> "\$LOG"
                         fi
                     fi
                 fi
@@ -918,12 +989,12 @@ while read path event; do
         # Clean up processing lock so future uploads can trigger new snapshots
         rm -f "\$processing_file" 2>/dev/null || true
     ) &  # End subprocess, run in background
-done
+                    else
 EOF
 
 chmod +x /var/terminas/scripts/terminas-monitor.sh
 
-# Create systemd unit for the monitor (preserve Environment variables if service exists)
+                            echo "\$(date '+%F %T') Quota check OK: User \$user at \${total_gb}GB / \${quota_limit_display}" >> "\$LOG"
 echo "Installing systemd unit for backup monitor..."
 if [ -f /etc/systemd/system/terminas-monitor.service ]; then
     # Extract existing Environment variables
@@ -1068,6 +1139,65 @@ LOG=/var/log/terminas.log
 
 log_msg() {
     echo "$(date '+%F %T') [CLEANUP] $*" >> "$LOG"
+}
+
+# Format bytes into a human-friendly quota string (prefers GB, falls back to MB).
+format_quota_display() {
+    local bytes="$1"
+    if [ -z "$bytes" ] || ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "0GB"
+        return 0
+    fi
+    local gb=$(echo "scale=2; $bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+    if echo "$gb >= 0.01" | bc -l >/dev/null 2>&1 && [ "$(echo "$gb >= 0.01" | bc)" -eq 1 ]; then
+        printf "%.2fGB" "$gb"
+    else
+        local mb=$(echo "scale=0; $bytes / 1024 / 1024" | bc 2>/dev/null || echo "0")
+        printf "%sMB" "$mb"
+    fi
+}
+
+# Parse quota values with optional unit suffix.
+# - raw: input string (e.g., "50", "50GB", "13000MB")
+# - default_unit: unit to assume when no suffix is provided (GB by default). Accepts GB, MB, or B.
+# Returns: "bytes|amount|unit|display" on success; non-zero on failure.
+parse_quota_value() {
+    local raw="$1"
+    local default_unit="${2:-GB}"
+
+    local normalized="${raw,,}"
+    normalized="${normalized// /}"
+
+    local amount=""
+    local unit=""
+
+    if [[ "$normalized" =~ ^([0-9]+)mb$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="MB"
+    elif [[ "$normalized" =~ ^([0-9]+)gb$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="GB"
+    elif [[ "$normalized" =~ ^([0-9]+)$ ]]; then
+        amount="$normalized"
+        case "${default_unit^^}" in
+            MB) unit="MB" ;;
+            B) unit="B" ;;
+            *) unit="GB" ;;
+        esac
+    else
+        return 1
+    fi
+
+    local bytes=0
+    case "$unit" in
+        MB) bytes=$((amount * 1024 * 1024)) ;;
+        B)  bytes=$amount ;;
+        *)  bytes=$((amount * 1024 * 1024 * 1024)) ;;
+    esac
+
+    local display="$(format_quota_display "$bytes")"
+    echo "${bytes}|${amount}|${unit}|${display}"
+    return 0
 }
 
 # Simple age-based cleanup
@@ -1248,10 +1378,14 @@ recheck_blocked_quotas() {
         [ ! -f "$home_dir/.terminas-quota-exceeded" ] && continue
         
         # Get configured quota limit
-        local quota_limit_gb=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
-        [ "$quota_limit_gb" = "0" ] && continue
-        
-        local quota_limit_bytes=$((quota_limit_gb * 1024 * 1024 * 1024))
+        local quota_limit_raw=$(cat "$home_dir/.terminas-quota-limit" 2>/dev/null || echo "0")
+        local quota_limit_bytes=0
+        local quota_limit_display="0GB"
+        if quota_parsed=$(parse_quota_value "$quota_limit_raw"); then
+            quota_limit_bytes=$(echo "$quota_parsed" | cut -d'|' -f1)
+            quota_limit_display=$(echo "$quota_parsed" | cut -d'|' -f4)
+        fi
+        [ "$quota_limit_bytes" -eq 0 ] && continue
         
         # Calculate total exclusive usage
         local total_exclusive_bytes=0
@@ -1288,10 +1422,10 @@ recheck_blocked_quotas() {
             if [ -n "$uploads_qgroup" ]; then
                 btrfs qgroup limit "$quota_limit_bytes" "$uploads_qgroup" /home 2>/dev/null || true
                 rm -f "$home_dir/.terminas-quota-exceeded" 2>/dev/null || true
-                log_msg "User $user: Quota restored - now at ${total_gb}GB / ${quota_limit_gb}GB (uploads unblocked)"
+                log_msg "User $user: Quota restored - now at ${total_gb}GB / ${quota_limit_display} (uploads unblocked)"
             fi
         else
-            log_msg "User $user: Still over quota at ${total_gb}GB / ${quota_limit_gb}GB"
+            log_msg "User $user: Still over quota at ${total_gb}GB / ${quota_limit_display}"
         fi
     done <<< "$users"
 }

@@ -72,6 +72,66 @@ get_backup_users() {
     getent group backupusers | cut -d: -f4 | tr ',' '\n' | grep -v '^$'
 }
 
+# Parse quota values with optional unit suffix.
+# - raw: input string (e.g., "50", "50GB", "13000MB", or legacy bytes when default_unit="B")
+# - default_unit: unit to assume when no suffix is provided (GB by default). Accepts GB, MB, or B.
+# Returns: "bytes|amount|unit|display" on success; non-zero on failure.
+parse_quota_value() {
+    local raw="$1"
+    local default_unit="${2:-GB}"
+
+    local normalized="${raw,,}"
+    normalized="${normalized// /}"
+
+    local amount=""
+    local unit=""
+
+    if [[ "$normalized" =~ ^([0-9]+)mb$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="MB"
+    elif [[ "$normalized" =~ ^([0-9]+)gb$ ]]; then
+        amount="${BASH_REMATCH[1]}"
+        unit="GB"
+    elif [[ "$normalized" =~ ^([0-9]+)$ ]]; then
+        amount="$normalized"
+        case "${default_unit^^}" in
+            MB) unit="MB" ;;
+            B) unit="B" ;;
+            *) unit="GB" ;;
+        esac
+    else
+        return 1
+    fi
+
+    local bytes=0
+    case "$unit" in
+        MB) bytes=$((amount * 1024 * 1024)) ;;
+        B)  bytes=$amount ;;
+        *)  bytes=$((amount * 1024 * 1024 * 1024)) ;;
+    esac
+
+    local display="$(format_quota_display "$bytes")"
+    echo "${bytes}|${amount}|${unit}|${display}"
+    return 0
+}
+
+# Format bytes into a human-friendly quota string (prefers GB, falls back to MB).
+format_quota_display() {
+    local bytes="$1"
+    if [ -z "$bytes" ] || ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "0GB"
+        return 0
+    fi
+    local gb=$(echo "scale=2; $bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
+    # If at least 0.01 GB, show GB with 2 decimals; otherwise show MB rounded.
+    if echo "$gb >= 0.01" | bc -l >/dev/null 2>&1 && [ "$(echo "$gb >= 0.01" | bc)" -eq 1 ]; then
+        printf "%.2fGB" "$gb"
+    else
+        local mb=$(echo "scale=0; $bytes / 1024 / 1024" | bc 2>/dev/null || echo "0")
+        printf "%sMB" "$mb"
+    fi
+}
+
 # Function to check if user is a backup user
 # Returns 0 if user is backup user, 1 if not
 # Usage: is_backup_user "username"
