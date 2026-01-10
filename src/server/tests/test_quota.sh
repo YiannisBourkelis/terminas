@@ -158,7 +158,7 @@ if btrfs qgroup show /home &>/dev/null; then
 else
     print_result "FAIL" "Btrfs quotas are NOT enabled on /home"
     echo ""
-    echo "To enable quotas, run: btrfs quota enable /home"
+    echo "To enable quotas, run: btrfs quota enable --simple /home"
     echo "Or re-run setup.sh"
     exit 1
 fi

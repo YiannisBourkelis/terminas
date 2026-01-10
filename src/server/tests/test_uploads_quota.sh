@@ -130,7 +130,7 @@ print_header "Checking Prerequisites"
 
 if ! btrfs qgroup show /home &>/dev/null; then
     print_result "FAIL" "Btrfs quotas not enabled on /home"
-    echo "Run: btrfs quota enable /home"
+    echo "Run: btrfs quota enable --simple /home"
     exit 1
 fi
 print_result "PASS" "Btrfs quotas enabled on /home"

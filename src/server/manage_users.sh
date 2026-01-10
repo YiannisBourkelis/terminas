@@ -1261,7 +1261,7 @@ set_quota_user() {
     # Check if quotas are enabled
     if ! btrfs qgroup show /home &>/dev/null; then
         echo "ERROR: Btrfs quotas are not enabled on /home"
-        echo "Run setup.sh to enable quotas, or manually: btrfs quota enable /home"
+        echo "Run setup.sh to enable quotas, or manually: btrfs quota enable --simple /home"
         return 1
     fi
     
@@ -1411,7 +1411,7 @@ show_quota_user() {
         echo ""
         echo "Quota: Not available (Btrfs quotas not enabled)"
         echo ""
-        echo "To enable quotas, run: btrfs quota enable /home"
+        echo "To enable quotas, run: btrfs quota enable --simple /home"
         return 0
     fi
     

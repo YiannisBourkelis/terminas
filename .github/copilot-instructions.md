@@ -157,11 +157,18 @@ Reference documentation for key technologies used in this project:
 - **Ownership**: root:backupusers with 755 (readable by user, immutable)
 
 ### Btrfs Quota Architecture
-Per-user storage quotas use a hybrid approach for reliable quota enforcement:
+Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-performance enforcement.
+
+**Why Simple Quotas?**
+- Full btrfs qgroup accounting causes severe write performance issues (kernel hangs)
+- Even level-0 qgroups with limits can block writes during back-reference resolution
+- Simple quotas (`btrfs quota enable --simple`) avoid this by attributing all extents to the subvolume that first allocated them
+- All accounting decisions are local to the allocation/freeing operation
+- Reference: https://btrfs.readthedocs.io/en/latest/Qgroups.html#simple-quotas-squota
 
 **Level-0 Qgroup (0/SUBVOL_ID)**: Direct quota on uploads subvolume
 - Created automatically when subvolume is created
-- Quota limit is set directly on uploads subvolume for fast enforcement
+- Quota limit is set directly on uploads subvolume
 - Stored in `/home/<username>/.terminas-qgroup`
 
 **Hybrid Quota Check**: Total usage monitoring after each snapshot
@@ -173,17 +180,12 @@ Per-user storage quotas use a hybrid approach for reliable quota enforcement:
   2. During daily retention cleanup (catches any missed cases)
 - Flag file: `/home/<username>/.terminas-quota-exceeded`
 
-**Why Not Level-1 Qgroups?**
-- Btrfs level-1 hierarchical qgroups with limits cause severe write performance issues
-- Kernel can hang during quota accounting with multiple subvolumes
-- Level-0 on uploads is fast and reliable
-
 **Configuration Files**:
 - `.terminas-qgroup`: Uploads subvolume qgroup ID (e.g., "0/1234")
 - `.terminas-quota-limit`: Configured quota limit in GB
 - `.terminas-quota-exceeded`: Flag file when over total quota
 
-**Reference**: https://btrfs.readthedocs.io/en/latest/Qgroups.html
+**Important**: Server setup uses `btrfs quota enable --simple /home` to enable squotas mode.
 
 ### Retention Policy
 **Grandfather-Father-Son (default)**:

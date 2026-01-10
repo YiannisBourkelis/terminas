@@ -95,13 +95,15 @@ fi
 echo "✓ Btrfs filesystem detected on /home"
 echo ""
 
-# Enable Btrfs quotas on /home filesystem
-echo "Enabling Btrfs quotas on /home..."
+# Enable Btrfs simple quotas (squotas) on /home filesystem
+# Simple quotas avoid the performance issues of full qgroup accounting
+# by attributing all extents to the subvolume that first allocated them
+echo "Enabling Btrfs simple quotas on /home..."
 if btrfs qgroup show /home &>/dev/null; then
     echo "  ✓ Btrfs quotas already enabled"
 else
-    if btrfs quota enable /home; then
-        echo "  ✓ Enabled Btrfs quotas"
+    if btrfs quota enable --simple /home; then
+        echo "  ✓ Enabled Btrfs simple quotas (squotas)"
         echo "  Note: Quota tracking may take a few minutes to initialize for existing data"
     else
         echo "  ⚠ WARNING: Failed to enable Btrfs quotas"

@@ -280,7 +280,7 @@ echo "Setting up Btrfs quota..."
 # Check if quotas are enabled
 if ! btrfs qgroup show /home &>/dev/null; then
     echo "  ⚠ WARNING: Btrfs quotas not enabled on /home"
-    echo "  Run setup.sh to enable quotas, or manually: btrfs quota enable /home"
+    echo "  Run setup.sh to enable quotas, or manually: btrfs quota enable --simple /home"
     echo "  Quota tracking will not be available for this user"
 else
     # Get the uploads subvolume ID
