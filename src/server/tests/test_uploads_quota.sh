@@ -170,14 +170,14 @@ fi
 # Check quota mode (squotas vs full qgroups)
 # With squotas, rescan returns "Invalid argument" because it's not needed
 echo "Checking quota mode..."
-rescan_result=$(btrfs quota rescan /home 2>&1)
+rescan_result=$(btrfs quota rescan /home 2>&1 || true)
 if echo "$rescan_result" | grep -qi "Invalid argument"; then
     print_result "PASS" "Using simple quotas (squotas) - fast mode"
     USING_SQUOTAS=true
 else
     # Full qgroups mode - wait for any rescan to complete
     USING_SQUOTAS=false
-    rescan_status=$(btrfs quota rescan -s /home 2>&1)
+    rescan_status=$(btrfs quota rescan -s /home 2>&1 || true)
     if echo "$rescan_status" | grep -qi "running\|progress"; then
         echo "Quota rescan is in progress. Waiting for completion..."
         btrfs quota rescan -w /home 2>/dev/null || true
