@@ -275,10 +275,10 @@ fi
 actual_size=$(du -m "$TEST_FILE_500MB" | cut -f1)
 print_result "INFO" "Created test file: ${actual_size}MB"
 
-echo "Copying 500MB file to uploads directory..."
+echo "Copying 500MB file to uploads directory (no reflink)..."
 
 # Use timeout (should be fast with level-0 quotas, but protect against edge cases)
-if timeout 30 cp "$TEST_FILE_500MB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
+if timeout 30 cp --reflink=never "$TEST_FILE_500MB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
     chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_500mb.dat"
     print_result "PASS" "500MB file uploaded successfully (as expected)"
 else
@@ -333,11 +333,11 @@ fi
 actual_size=$(du -m "$TEST_FILE_1GB" | cut -f1)
 print_result "INFO" "Created test file: ${actual_size}MB"
 
-echo "Attempting to copy 1GB file to uploads directory..."
+echo "Attempting to copy 1GB file to uploads directory (no reflink)..."
 echo "(This should fail with 'Disk quota exceeded')"
 echo ""
 
-if cp "$TEST_FILE_1GB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
+if cp --reflink=never "$TEST_FILE_1GB" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
     # File was copied - quota not enforced!
     print_result "FAIL" "1GB file was copied - QUOTA NOT ENFORCED!"
     echo ""
