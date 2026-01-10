@@ -101,8 +101,8 @@ create_user_and_snapshot() {
   dd if=/dev/urandom of="$TEST_FILE" bs=1M count=20 status=none
   pass "Test file created"
 
-  log "Copying test file to uploads and fixing ownership"
-  cp "$TEST_FILE" "/home/$TEST_USER/uploads/"
+  log "Copying test file to uploads (no reflink) and fixing ownership"
+  cp --reflink=never "$TEST_FILE" "/home/$TEST_USER/uploads/"
   chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/$(basename "$TEST_FILE")"
   pass "File in uploads"
 

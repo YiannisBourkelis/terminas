@@ -295,8 +295,8 @@ else
     exit 1
 fi
 
-echo "Copying file to user's uploads directory..."
-cp "$TEST_FILE_1" "/home/$TEST_USER/uploads/"
+echo "Copying file to user's uploads directory (no reflink)..."
+cp --reflink=never "$TEST_FILE_1" "/home/$TEST_USER/uploads/"
 chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_1.dat"
 
 if [ -f "/home/$TEST_USER/uploads/test_file_1.dat" ]; then
@@ -343,8 +343,8 @@ TEST_FILE_2="$TEST_FILES_DIR/test_file_2.dat"
 dd if=/dev/urandom of="$TEST_FILE_2" bs=10M count=$((TEST_FILE_SIZE_MB / 10)) status=progress 2>&1 | grep -v records || true
 echo "✓ Second test file created"
 
-echo "Copying second file..."
-if cp "$TEST_FILE_2" "/home/$TEST_USER/uploads/" 2>/tmp/cp2_error.txt; then
+echo "Copying second file (no reflink)..."
+if cp --reflink=never "$TEST_FILE_2" "/home/$TEST_USER/uploads/" 2>/tmp/cp2_error.txt; then
     echo "✓ Second file copied successfully"
     chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_2.dat"
 else
@@ -408,9 +408,9 @@ TEST_FILE_3="$TEST_FILES_DIR/test_file_3.dat"
 # Use /dev/urandom for unique data (prevents Btrfs deduplication)
 dd if=/dev/urandom of="$TEST_FILE_3" bs=10M count=$((TEST_FILE_SIZE_MB / 10)) status=progress 2>&1 | grep -v records || true
 
-echo "Copying third file (testing quota enforcement)..."
+echo "Copying third file (testing quota enforcement, no reflink)..."
 QUOTA_BLOCKED_AT=""
-if cp "$TEST_FILE_3" "/home/$TEST_USER/uploads/" 2>/tmp/cp3_error.txt; then
+if cp --reflink=never "$TEST_FILE_3" "/home/$TEST_USER/uploads/" 2>/tmp/cp3_error.txt; then
     chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_3.dat"
     echo "✓ Third file copied successfully"
 else
@@ -444,8 +444,8 @@ if [ -z "$QUOTA_BLOCKED_AT" ]; then
     # Use /dev/urandom for unique data (prevents Btrfs deduplication)
     dd if=/dev/urandom of="$TEST_FILE_4" bs=10M count=$((TEST_FILE_SIZE_MB / 10)) status=progress 2>&1 | grep -v records || true
 
-    echo "Attempting to copy fourth file (should be blocked by Btrfs quota)..."
-    if cp "$TEST_FILE_4" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
+    echo "Attempting to copy fourth file (should be blocked by Btrfs quota, no reflink)..."
+    if cp --reflink=never "$TEST_FILE_4" "/home/$TEST_USER/uploads/" 2>/tmp/cp_error.txt; then
         chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_4.dat"
         print_result "INFO" "File copy succeeded (quota not enforced or limit not reached yet)"
     else
@@ -528,8 +528,8 @@ TEST_FILE_5="$TEST_FILES_DIR/test_file_5.dat"
 # Use /dev/urandom for unique data (prevents Btrfs deduplication)
 dd if=/dev/urandom of="$TEST_FILE_5" bs=10M count=10 status=progress 2>&1 | grep -v records || true
 
-echo "Copying fifth file..."
-cp "$TEST_FILE_5" "/home/$TEST_USER/uploads/"
+echo "Copying fifth file to uploads (will be used to test cleanup, no reflink)..."
+cp --reflink=never "$TEST_FILE_5" "/home/$TEST_USER/uploads/"
 chown "$TEST_USER:backupusers" "/home/$TEST_USER/uploads/test_file_5.dat"
 
 # Get snapshot count before
