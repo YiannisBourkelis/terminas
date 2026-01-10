@@ -989,12 +989,11 @@ while read path event; do
         # Clean up processing lock so future uploads can trigger new snapshots
         rm -f "\$processing_file" 2>/dev/null || true
     ) &  # End subprocess, run in background
-                    else
+done
 EOF
 
 chmod +x /var/terminas/scripts/terminas-monitor.sh
 
-                            echo "\$(date '+%F %T') Quota check OK: User \$user at \${total_gb}GB / \${quota_limit_display}" >> "\$LOG"
 echo "Installing systemd unit for backup monitor..."
 if [ -f /etc/systemd/system/terminas-monitor.service ]; then
     # Extract existing Environment variables
