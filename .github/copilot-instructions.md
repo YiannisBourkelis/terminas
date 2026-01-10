@@ -111,15 +111,8 @@ Windows: C:\Program Files\terminas-backup\, C:\ProgramData\terminas-credentials\
 Reference documentation for key technologies used in this project:
 
 ### Filesystem & Storage
-- **Btrfs Quota Groups (qgroups)**: https://btrfs.readthedocs.io/en/latest/Qgroups.html
-- **Btrfs Documentation**: https://btrfs.readthedocs.io/en/latest/
-- **Linux Quota**: https://linux.die.net/man/1/quota
-
 ### Monitoring & Automation
 - **inotify-tools**: https://github.com/inotify-tools/inotify-tools/wiki
-- **systemd Services**: https://www.freedesktop.org/software/systemd/man/systemd.service.html
-- **cron**: https://man7.org/linux/man-pages/man5/crontab.5.html
-
 ### SSH & Security
 - **OpenSSH**: https://www.openssh.com/manual.html
 - **SFTP Chroot Configuration**: https://man.openbsd.org/sshd_config#ChrootDirectory
