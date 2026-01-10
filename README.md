@@ -1707,33 +1707,32 @@ Check if quotas are enabled:
 sudo btrfs qgroup show /home
 ```
 
-If you see "ERROR: can't list qgroups: quotas not enabled", enable quotas:
+If you see "ERROR: can't list qgroups: quotas not enabled", enable **simple quotas (squotas)**:
 ```bash
-# Enable quotas
-sudo btrfs quota enable /home
-
-# Rescan existing data (may take time on large filesystems)
-sudo btrfs quota rescan /home
+# Enable simple quotas (squota mode)
+sudo btrfs quota disable /home
+sudo btrfs quota enable --simple /home
 
 # Verify
 sudo btrfs qgroup show /home
 ```
 
-Or re-run setup script (automatically enables quotas):
+Or re-run setup script (automatically enables squotas):
 ```bash
 sudo ./src/server/setup.sh
 ```
 
 **Problem: Quota shows incorrect usage / not updating**
 
-Trigger quota rescan:
+In squota mode, `btrfs quota rescan` is not needed (and returns "Invalid argument"). If accounting looks stale:
 ```bash
-# Rescan quota usage (may take several minutes on large filesystems)
-sudo btrfs quota rescan -w /home
+# Refresh accounting by toggling squotas
+sudo btrfs quota disable /home
+sudo btrfs quota enable --simple /home
 
-# Check rescan status
-sudo btrfs quota rescan -s /home
-
+# Then verify
+sudo btrfs qgroup show -r /home | head
+```
 # View updated quota
 sudo ./src/server/manage_users.sh show-quota username
 ```
