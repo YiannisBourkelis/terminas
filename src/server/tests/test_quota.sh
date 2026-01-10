@@ -29,6 +29,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Track failures for final summary
+TEST_FAILED=false
 # Get script directory (tests folder) and parent directory (server scripts)
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT_DIR="$(cd "$TEST_DIR/.." && pwd)"
@@ -80,6 +82,7 @@ print_result() {
         echo -e "${GREEN}✓ PASS:${NC} $message"
     elif [ "$result" = "FAIL" ]; then
         echo -e "${RED}✗ FAIL:${NC} $message"
+        TEST_FAILED=true
     elif [ "$result" = "INFO" ]; then
         echo -e "${YELLOW}ℹ INFO:${NC} $message"
     fi
@@ -331,8 +334,8 @@ btrfs quota rescan -w /home 2>/dev/null || true
 
 # Check quota usage
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" > /tmp/quota_output.txt 2>&1
-current_usage=$(grep "Current usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
-print_result "INFO" "Quota usage after first file: $current_usage"
+current_usage=$(grep "Usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
+print_result "INFO" "Quota usage after first file: ${current_usage:-unknown}"
 
 # TEST 5: Upload more files to approach quota limit
 print_header "TEST 5/10: Upload Files to Approach Quota Limit (90%+ Warning)"
@@ -376,9 +379,9 @@ btrfs quota rescan -w /home 2>/dev/null || true
 
 # Check quota usage
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" > /tmp/quota_output.txt 2>&1
-current_usage=$(grep "Current usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
-usage_pct=$(grep "Current usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+%' | head -1)
-print_result "INFO" "Quota usage after second file: $current_usage ($usage_pct)"
+current_usage=$(grep "Usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
+usage_pct=$(grep "Usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+%' | head -1)
+print_result "INFO" "Quota usage after second file: ${current_usage:-unknown} (${usage_pct:-n/a})"
 
 # Check if warning is shown
 if grep -q "WARNING: Storage usage is above 90%" /tmp/quota_output.txt; then
@@ -434,8 +437,8 @@ btrfs quota rescan -w /home 2>/dev/null || true
 
 # Check current quota usage
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" > /tmp/quota_output.txt 2>&1
-current_usage=$(grep "Current usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
-print_result "INFO" "Quota usage after third file attempt: $current_usage"
+current_usage=$(grep "Usage:" /tmp/quota_output.txt | grep -oP '\d+\.\d+GB' | head -1)
+print_result "INFO" "Quota usage after third file attempt: ${current_usage:-unknown}"
 
 # Now create a fourth file to push over quota limit (if not already blocked)
 if [ -z "$QUOTA_BLOCKED_AT" ]; then
@@ -499,7 +502,7 @@ fi
 # Check quota status
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" > /tmp/quota_output.txt 2>&1
 print_result "INFO" "Final quota status:"
-cat /tmp/quota_output.txt | grep -E "Quota limit|Current usage|Available|WARNING"
+cat /tmp/quota_output.txt | grep -E "Limit|Usage|Available|WARNING"
 
 # TEST 7: Test quota modification
 print_header "TEST 7/10: Test Quota Modification (Increase Limit)"
@@ -514,7 +517,7 @@ fi
 
 # Verify new quota
 "$SCRIPT_DIR/manage_users.sh" show-quota "$TEST_USER" > /tmp/quota_output.txt 2>&1
-if grep -q "Quota limit: 2.00GB" /tmp/quota_output.txt; then
+if grep -q "Limit: 2.00GB" /tmp/quota_output.txt; then
     print_result "PASS" "New quota limit verified"
 else
     print_result "FAIL" "Quota limit not updated correctly"
@@ -585,18 +588,24 @@ fi
 # Summary
 print_header "TEST SUMMARY"
 
-echo "Test Results:"
-echo "  ✓ Btrfs quotas enabled and functional"
-echo "  ✓ User creation with quota works"
-echo "  ✓ Quota configuration verified"
-echo "  ✓ File uploads and snapshots work"
-echo "  ✓ Quota enforcement blocks snapshots when exceeded"
-echo "  ✓ Quota modification (increase/decrease) works"
-echo "  ✓ Quota removal (unlimited) works"
-echo "  ✓ Quota info displayed in management commands"
-echo ""
-print_result "INFO" "Check /var/log/terminas.log for detailed logs"
-echo ""
+if [ "$TEST_FAILED" = false ]; then
+    echo "Test Results:"
+    echo "  ✓ Btrfs quotas enabled and functional"
+    echo "  ✓ User creation with quota works"
+    echo "  ✓ Quota configuration verified"
+    echo "  ✓ File uploads and snapshots work"
+    echo "  ✓ Quota enforcement blocks snapshots when exceeded"
+    echo "  ✓ Quota modification (increase/decrease) works"
+    echo "  ✓ Quota removal (unlimited) works"
+    echo "  ✓ Quota info displayed in management commands"
+    echo ""
+    print_result "INFO" "Check /var/log/terminas.log for detailed logs"
+    echo ""
+else
+    echo "Some tests FAILED. See above for details."
+    print_result "INFO" "Check /var/log/terminas.log for detailed logs"
+    echo ""
+fi
 
 # Cleanup prompt
 echo -e "${YELLOW}Cleanup:${NC}"
@@ -610,7 +619,15 @@ rm -f /tmp/create_user_output.txt /tmp/quota_output.txt
 rm -f /tmp/set_quota_output.txt /tmp/remove_quota_output.txt /tmp/info_output.txt
 rm -f /tmp/recent_log.txt /tmp/recent_user_log.txt /tmp/cp2_error.txt /tmp/cp3_error.txt /tmp/cp_error.txt
 
-echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  All Tests Completed!${NC}"
-echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
-echo ""
+if [ "$TEST_FAILED" = false ]; then
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  All Tests Completed!${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════${NC}"
+    echo ""
+else
+    echo -e "${RED}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${RED}  Tests Completed WITH FAILURES${NC}"
+    echo -e "${RED}═══════════════════════════════════════════════════════${NC}"
+    echo ""
+    exit 1
+fi
