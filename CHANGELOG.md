@@ -5,6 +5,22 @@ All notable changes to termiNAS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.3] - 2026-01-11
+
+### Added
+- Hybrid Btrfs simple-quota architecture with migration tooling and documentation to enforce limits across uploads and snapshots.
+- `manage_users.sh change-password` command to rotate SFTP/Samba credentials with strength validation and synced updates.
+- Expanded automated coverage for quotas, monitor lifecycle, and user deletion to detect regressions earlier.
+
+### Changed
+- Quota handling across setup, create_user, and manage_users now parses GB/MB limits consistently, uses referenced/exclusive bytes for accuracy, and formats output for clarity.
+- Snapshot cleanup and deletion workflows improve Btrfs space reclamation (pending deletions handling, inotify exclusions) and standardize monitor/cleanup scripts under `/var/terminas` with fixed service generation.
+- Documentation refreshed around simple quotas, Btrfs behavior, and retention expectations.
+
+### Fixed
+- User deletion and quota tests now handle quota rescan edge cases, stop monitor subprocesses, avoid reflink quirks, and provide clearer failure signals.
+- Samba audit configuration streamlined and setup hardening expanded with additional SSH security/package checks.
+
 ## [1.0.0-alpha.2] - 2025-10-23
 
 ### Performance Improvements
@@ -31,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Initial alpha release of termiNAS backup server
+
 - **Core Features**:
   - Real-time incremental snapshot system using Btrfs and inotify
   - Ransomware protection via root-owned, immutable snapshot versions
@@ -127,4 +144,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+[1.0.0-alpha.3]: https://github.com/YiannisBourkelis/terminas/releases/tag/v1.0.0-alpha.3
+[1.0.0-alpha.2]: https://github.com/YiannisBourkelis/terminas/releases/tag/v1.0.0-alpha.2
 [1.0.0-alpha.1]: https://github.com/YiannisBourkelis/terminas/releases/tag/v1.0.0-alpha.1
