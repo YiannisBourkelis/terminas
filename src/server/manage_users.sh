@@ -1565,8 +1565,8 @@ list_users() {
     local warn_threshold=$((15 * 86400))  # 15 days in seconds
     
     # FAST: Pre-fetch ALL qgroup data in a single call (instant - kernel-maintained)
-    # This replaces slow per-user btrfs filesystem du calls
-    declare -A QGROUP_SIZES  # Maps qgroup_id -> "rfer excl" in bytes
+    # Maps subvolume_id -> "rfer excl" in bytes
+    declare -A QGROUP_SIZES
     if command -v btrfs &>/dev/null && btrfs qgroup show /home &>/dev/null; then
         while IFS= read -r line; do
             # Parse: 0/256   16384   16384
@@ -1589,20 +1589,48 @@ list_users() {
             continue
         fi
         
-        # Get size from qgroup (FAST - kernel-maintained data)
+        # Calculate sizes using qgroups (FAST)
         local actual_size="0.00"
+        local apparent_size="0.00"
+        local total_excl=0
+        local total_rfer=0
+        
+        # Get uploads subvolume qgroup
         local qgroup_file="$home_dir/.terminas-qgroup"
         if [ -f "$qgroup_file" ]; then
             local uploads_qgroup=$(cat "$qgroup_file" 2>/dev/null)
             if [ -n "$uploads_qgroup" ] && [ -n "${QGROUP_SIZES[$uploads_qgroup]:-}" ]; then
                 local qdata="${QGROUP_SIZES[$uploads_qgroup]}"
-                local rfer_bytes=$(echo "$qdata" | awk '{print $1}')
-                actual_size=$(awk "BEGIN {printf \"%.2f\", $rfer_bytes / 1024 / 1024}")
+                local rfer=$(echo "$qdata" | awk '{print $1}')
+                local excl=$(echo "$qdata" | awk '{print $2}')
+                total_rfer=$((total_rfer + rfer))
+                total_excl=$((total_excl + excl))
             fi
         fi
         
-        # apparent size = actual size (qgroup rfer is the logical/referenced size)
-        local apparent_size="$actual_size"
+        # Get all snapshot subvolumes qgroups (versions directory)
+        if [ -d "$home_dir/versions" ]; then
+            for snapshot_dir in "$home_dir/versions"/*; do
+                [ -d "$snapshot_dir" ] || continue
+                # Get subvolume ID for this snapshot
+                local snap_id=$(btrfs subvolume show "$snapshot_dir" 2>/dev/null | grep -oP 'Subvolume ID:\s+\K[0-9]+' || echo "")
+                if [ -n "$snap_id" ]; then
+                    local snap_qgroup="0/$snap_id"
+                    if [ -n "${QGROUP_SIZES[$snap_qgroup]:-}" ]; then
+                        local qdata="${QGROUP_SIZES[$snap_qgroup]}"
+                        local rfer=$(echo "$qdata" | awk '{print $1}')
+                        local excl=$(echo "$qdata" | awk '{print $2}')
+                        total_rfer=$((total_rfer + rfer))
+                        total_excl=$((total_excl + excl))
+                    fi
+                fi
+            done
+        fi
+        
+        # Size = exclusive bytes (actual unique disk space used)
+        # Apparent = referenced bytes (logical size as if no deduplication)
+        actual_size=$(awk "BEGIN {printf \"%.2f\", $total_excl / 1024 / 1024}")
+        apparent_size=$(awk "BEGIN {printf \"%.2f\", $total_rfer / 1024 / 1024}")
         
         # Count snapshots (fast - just counts directories)
         local snapshot_count=0
@@ -1726,9 +1754,9 @@ list_users() {
     fi
     
     echo ""
-    echo "Note: Size(MB) shows physical disk usage with Btrfs deduplication"
-    echo "      Apparent shows logical size (sum of all files as if independent copies)"
-    echo "      The difference shows space saved by Btrfs CoW snapshots"
+    echo "Note: Size(MB) = exclusive disk space (unique data in uploads + snapshots)"
+    echo "      Apparent = logical size (uploads + all snapshots as if no deduplication)"
+    echo "      Difference = space saved by Btrfs CoW snapshots"
     echo "      Protocol shows available access methods (SFTP or SMB+SFTP)"
     echo "      SMB* = Read-only versions access enabled (disable with 'disable-samba-versions <user>')"
     echo "      Last Snapshot shows when the most recent snapshot was created"
