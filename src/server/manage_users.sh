@@ -402,8 +402,9 @@ get_actual_size() {
 get_apparent_size() {
     local path="$1"
     if [ -d "$path" ]; then
-        # Sum all file sizes using stat and convert directly to MB with awk (avoids bc syntax errors)
-        local mb=$(find "$path" -type f -exec stat -c %s {} \; 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
+        # Use find -printf to get file sizes without spawning a separate process per file
+        # This is MUCH faster than -exec stat for directories with many files
+        local mb=$(find "$path" -type f -printf '%s\n' 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
         if [ -z "$mb" ] || [ "$mb" = "0.00" ]; then
             echo "0.00"
         else
