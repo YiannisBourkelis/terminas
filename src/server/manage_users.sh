@@ -1558,8 +1558,8 @@ list_users() {
         build_samba_connection_cache
     fi
     
-    local total_actual="0.00"
-    local total_apparent="0.00"
+    local total_actual=0
+    local total_apparent=0
     local total_users=0
     local now=$(date +%s)
     local warn_threshold=$((15 * 86400))  # 15 days in seconds
@@ -1574,59 +1574,21 @@ list_users() {
             continue
         fi
         
-        # Calculate sizes using Btrfs-aware method
-        local actual_size="0.00"
-        local apparent_size="0.00"
+        # Calculate sizes - use fast du-based method instead of slow btrfs filesystem du
+        # du -s already handles hardlinks correctly (counts shared blocks once)
+        local actual_size=$(du -sm "$home_dir" 2>/dev/null | awk '{print $1}')
+        [ -z "$actual_size" ] && actual_size="0"
         
-        # Try to get actual physical usage from btrfs filesystem du
-        if command -v btrfs &>/dev/null; then
-            local btrfs_output=$(btrfs filesystem du -s "$home_dir" 2>/dev/null)
-            if [ -n "$btrfs_output" ]; then
-                local data_line=$(echo "$btrfs_output" | tail -1)
-                local exclusive_raw=$(echo "$data_line" | awk '{print $2}')
-                local shared_raw=$(echo "$data_line" | awk '{print $3}')
-                
-                # Convert to MB
-                local exclusive_mb=$(echo "$exclusive_raw" | awk '{
-                    size=$1;
-                    if (size ~ /GiB/) { gsub(/[^0-9.]/, "", size); print size * 1024 }
-                    else if (size ~ /MiB/) { gsub(/[^0-9.]/, "", size); print size }
-                    else if (size ~ /KiB/) { gsub(/[^0-9.]/, "", size); print size / 1024 }
-                    else if (size ~ /B$/) { gsub(/[^0-9.]/, "", size); print size / 1024 / 1024 }
-                    else { print size / 1024 / 1024 }
-                }')
-                
-                local shared_mb=$(echo "$shared_raw" | awk '{
-                    size=$1;
-                    if (size ~ /GiB/) { gsub(/[^0-9.]/, "", size); print size * 1024 }
-                    else if (size ~ /MiB/) { gsub(/[^0-9.]/, "", size); print size }
-                    else if (size ~ /KiB/) { gsub(/[^0-9.]/, "", size); print size / 1024 }
-                    else if (size ~ /B$/) { gsub(/[^0-9.]/, "", size); print size / 1024 / 1024 }
-                    else if (size == "-") { print 0 }
-                    else { print size / 1024 / 1024 }
-                }')
-                
-                actual_size=$(echo "scale=2; ($exclusive_mb + $shared_mb) / 1" | bc)
-            fi
-        fi
+        # For apparent size, use du --apparent-size which is much faster than find+stat
+        # This counts logical file sizes (hardlinks counted multiple times)
+        local apparent_size=$(du -sm --apparent-size "$home_dir" 2>/dev/null | awk '{print $1}')
+        [ -z "$apparent_size" ] && apparent_size="0"
         
-        # Fallback to du if btrfs command failed
-        if [ "$actual_size" = "0.00" ]; then
-            actual_size=$(get_actual_size "$home_dir")
-        fi
-        
-        # Calculate logical size (sum of all files in uploads + all snapshots)
-        local uploads_logical=$(get_apparent_size "$home_dir/uploads")
-        
-        # Count snapshots and calculate logical size using shared function
+        # Count snapshots (fast - just counts directories)
         local snapshot_count=0
-        local snapshots_logical="0.00"
         if [ -d "$home_dir/versions" ]; then
             snapshot_count=$(find "$home_dir/versions" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-            snapshots_logical=$(get_snapshots_logical_size "$home_dir/versions")
         fi
-        
-        apparent_size=$(echo "scale=2; ($uploads_logical + $snapshots_logical) / 1" | bc)
         
         # Get last backup date
         local backup_info=$(get_last_backup_date "$user")
@@ -1728,9 +1690,9 @@ list_users() {
             fi
         fi
         
-        # Sum up totals using bc for decimal arithmetic
-        total_actual=$(echo "$total_actual + $actual_size" | bc)
-        total_apparent=$(echo "$total_apparent + $apparent_size" | bc)
+        # Sum up totals (integers now, no bc needed)
+        total_actual=$((total_actual + actual_size))
+        total_apparent=$((total_apparent + apparent_size))
         total_users=$((total_users + 1))
     done <<< "$users"
     
