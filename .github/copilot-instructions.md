@@ -25,7 +25,7 @@ termiNAS is a secure, versioned backup server for Debian Linux that provides ran
 ### User Experience Goals
 - One-command server setup (`setup.sh`)
 - One-command user creation (`create_user.sh <username>`)
-- Interactive client setup wizards (Linux: `setup-client.sh`, Windows: `setup-client.ps1`)
+- Interactive client setup wizards (Linux: `setup-client.sh`, Windows: rclone guide)
 - Comprehensive management tools (`manage_users.sh` with 9 commands)
 - Clear documentation with troubleshooting guides
 
@@ -48,9 +48,8 @@ terminas/
         ├── linux/               # Linux/Unix clients
         │   ├── setup-client.sh # Interactive automated backup setup
         │   └── upload.sh       # Manual upload with hash checking
-        └── windows/             # Windows clients (PowerShell)
-            ├── setup-client.ps1 # Interactive automated backup setup
-            └── upload.ps1      # Manual upload with hash checking
+        └── windows/             # Windows clients
+          └── RCLONE_BACKUP_SETUP.md  # rclone-based SFTP backup guide
 
 Server Runtime Files (created by setup.sh):
 /var/terminas/scripts/
@@ -246,8 +245,8 @@ Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-perfo
 5. Add troubleshooting section if complex
 
 ### Adding a New Client Feature
-1. Update both `upload.sh` (Linux) and `upload.ps1` (Windows) for parity
-2. Update `setup-client.sh` and `setup-client.ps1` if automation needed
+1. Update Linux client scripts (`upload.sh`, `setup-client.sh`) as needed
+2. Update Windows documentation (`src/client/windows/RCLONE_BACKUP_SETUP.md`) for rclone-based backups
 3. Test on multiple client OS versions
 4. Update README.md with examples
 5. Update manual scheduling section if applicable

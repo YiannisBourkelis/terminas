@@ -77,10 +77,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `upload.sh`: Manual upload with SHA-256 hash checking to skip unchanged files
     - Support for lftp (preferred) and sftp
   - **Windows Client**:
-    - `setup-client.ps1`: Interactive automated backup setup with Task Scheduler
-    - `upload.ps1`: Manual upload with SHA-256 hash checking and incremental sync
-    - WinSCP integration for SFTP transfers
-    - PowerShell 2.0+ compatibility (Windows Server 2008 R2+)
+    - rclone + SFTP sync (see `src/client/windows/RCLONE_BACKUP_SETUP.md`)
+    - Supports older Windows by using rclone v1.63.1 (log rotation flags not available)
 
 - **Security Features**:
   - Chroot environment prevents filesystem traversal
