@@ -1558,11 +1558,42 @@ list_users() {
         build_samba_connection_cache
     fi
     
-    local total_actual=0
-    local total_apparent=0
+    local total_actual="0.00"
+    local total_apparent="0.00"
     local total_users=0
     local now=$(date +%s)
     local warn_threshold=$((15 * 86400))  # 15 days in seconds
+    
+    # Pre-calculate all user sizes in parallel (HUGE performance boost)
+    # This runs btrfs filesystem du for all users simultaneously
+    declare -A USER_SIZES
+    local tmpdir=$(mktemp -d)
+    
+    while IFS= read -r user; do
+        [ -z "$user" ] && continue
+        local home_dir="/home/$user"
+        [ ! -d "$home_dir" ] && continue
+        
+        # Run btrfs du in background, write results to temp file
+        (
+            if command -v btrfs &>/dev/null; then
+                local btrfs_output=$(btrfs filesystem du -s "$home_dir" 2>/dev/null | tail -1)
+                if [ -n "$btrfs_output" ]; then
+                    echo "$btrfs_output" > "$tmpdir/$user.btrfs"
+                fi
+            fi
+            
+            # Also calculate apparent size in parallel
+            local uploads_logical=$(find "$home_dir/uploads" -type f -printf '%s\n' 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
+            local snapshots_logical=$(find "$home_dir/versions" -type f -printf '%s\n' 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
+            [ -z "$uploads_logical" ] && uploads_logical="0.00"
+            [ -z "$snapshots_logical" ] && snapshots_logical="0.00"
+            echo "$uploads_logical $snapshots_logical" > "$tmpdir/$user.apparent"
+        ) &
+    done <<< "$users"
+    
+    # Wait for all background jobs to complete
+    wait
     
     while IFS= read -r user; do
         if [ -z "$user" ]; then
@@ -1574,15 +1605,45 @@ list_users() {
             continue
         fi
         
-        # Calculate sizes - use fast du-based method instead of slow btrfs filesystem du
-        # du -s already handles hardlinks correctly (counts shared blocks once)
-        local actual_size=$(du -sm "$home_dir" 2>/dev/null | awk '{print $1}')
-        [ -z "$actual_size" ] && actual_size="0"
+        # Read pre-calculated sizes from temp files
+        local actual_size="0.00"
+        local apparent_size="0.00"
         
-        # For apparent size, use du --apparent-size which is much faster than find+stat
-        # This counts logical file sizes (hardlinks counted multiple times)
-        local apparent_size=$(du -sm --apparent-size "$home_dir" 2>/dev/null | awk '{print $1}')
-        [ -z "$apparent_size" ] && apparent_size="0"
+        if [ -f "$tmpdir/$user.btrfs" ]; then
+            local data_line=$(cat "$tmpdir/$user.btrfs")
+            local exclusive_raw=$(echo "$data_line" | awk '{print $2}')
+            local shared_raw=$(echo "$data_line" | awk '{print $3}')
+            
+            # Convert to MB using awk (faster than multiple bc calls)
+            actual_size=$(echo "$exclusive_raw $shared_raw" | awk '{
+                exc=$1; shr=$2;
+                # Parse exclusive
+                if (exc ~ /GiB/) { gsub(/[^0-9.]/, "", exc); exc = exc * 1024 }
+                else if (exc ~ /MiB/) { gsub(/[^0-9.]/, "", exc) }
+                else if (exc ~ /KiB/) { gsub(/[^0-9.]/, "", exc); exc = exc / 1024 }
+                else { gsub(/[^0-9.]/, "", exc); exc = exc / 1024 / 1024 }
+                # Parse shared
+                if (shr == "-") { shr = 0 }
+                else if (shr ~ /GiB/) { gsub(/[^0-9.]/, "", shr); shr = shr * 1024 }
+                else if (shr ~ /MiB/) { gsub(/[^0-9.]/, "", shr) }
+                else if (shr ~ /KiB/) { gsub(/[^0-9.]/, "", shr); shr = shr / 1024 }
+                else { gsub(/[^0-9.]/, "", shr); shr = shr / 1024 / 1024 }
+                printf "%.2f", exc + shr
+            }')
+        fi
+        
+        # Fallback to du if btrfs failed
+        if [ "$actual_size" = "0.00" ] || [ -z "$actual_size" ]; then
+            actual_size=$(du -sm "$home_dir" 2>/dev/null | awk '{printf "%.2f", $1}')
+            [ -z "$actual_size" ] && actual_size="0.00"
+        fi
+        
+        if [ -f "$tmpdir/$user.apparent" ]; then
+            read uploads_logical snapshots_logical < "$tmpdir/$user.apparent"
+            [ -z "$uploads_logical" ] && uploads_logical="0.00"
+            [ -z "$snapshots_logical" ] && snapshots_logical="0.00"
+            apparent_size=$(awk "BEGIN {printf \"%.2f\", $uploads_logical + $snapshots_logical}")
+        fi
         
         # Count snapshots (fast - just counts directories)
         local snapshot_count=0
@@ -1690,11 +1751,14 @@ list_users() {
             fi
         fi
         
-        # Sum up totals (integers now, no bc needed)
-        total_actual=$((total_actual + actual_size))
-        total_apparent=$((total_apparent + apparent_size))
+        # Sum up totals using bc for decimal arithmetic
+        total_actual=$(echo "$total_actual + $actual_size" | bc)
+        total_apparent=$(echo "$total_apparent + $apparent_size" | bc)
         total_users=$((total_users + 1))
     done <<< "$users"
+    
+    # Cleanup temp files
+    rm -rf "$tmpdir"
     
     # Print footer with appropriate line length
     if [ "$any_samba" = true ]; then
