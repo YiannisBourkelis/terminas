@@ -1564,36 +1564,20 @@ list_users() {
     local now=$(date +%s)
     local warn_threshold=$((15 * 86400))  # 15 days in seconds
     
-    # Pre-calculate all user sizes in parallel (HUGE performance boost)
-    # This runs btrfs filesystem du for all users simultaneously
-    declare -A USER_SIZES
-    local tmpdir=$(mktemp -d)
-    
-    while IFS= read -r user; do
-        [ -z "$user" ] && continue
-        local home_dir="/home/$user"
-        [ ! -d "$home_dir" ] && continue
-        
-        # Run btrfs du in background, write results to temp file
-        (
-            if command -v btrfs &>/dev/null; then
-                local btrfs_output=$(btrfs filesystem du -s "$home_dir" 2>/dev/null | tail -1)
-                if [ -n "$btrfs_output" ]; then
-                    echo "$btrfs_output" > "$tmpdir/$user.btrfs"
-                fi
+    # FAST: Pre-fetch ALL qgroup data in a single call (instant - kernel-maintained)
+    # This replaces slow per-user btrfs filesystem du calls
+    declare -A QGROUP_SIZES  # Maps qgroup_id -> "rfer excl" in bytes
+    if command -v btrfs &>/dev/null && btrfs qgroup show /home &>/dev/null; then
+        while IFS= read -r line; do
+            # Parse: 0/256   16384   16384
+            local qgid=$(echo "$line" | awk '{print $1}')
+            local rfer=$(echo "$line" | awk '{print $2}')
+            local excl=$(echo "$line" | awk '{print $3}')
+            if [[ "$qgid" =~ ^0/[0-9]+$ ]] && [[ "$rfer" =~ ^[0-9]+$ ]]; then
+                QGROUP_SIZES["$qgid"]="$rfer $excl"
             fi
-            
-            # Also calculate apparent size in parallel
-            local uploads_logical=$(find "$home_dir/uploads" -type f -printf '%s\n' 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
-            local snapshots_logical=$(find "$home_dir/versions" -type f -printf '%s\n' 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
-            [ -z "$uploads_logical" ] && uploads_logical="0.00"
-            [ -z "$snapshots_logical" ] && snapshots_logical="0.00"
-            echo "$uploads_logical $snapshots_logical" > "$tmpdir/$user.apparent"
-        ) &
-    done <<< "$users"
-    
-    # Wait for all background jobs to complete
-    wait
+        done < <(btrfs qgroup show --raw /home 2>/dev/null | tail -n +3)
+    fi
     
     while IFS= read -r user; do
         if [ -z "$user" ]; then
@@ -1605,45 +1589,20 @@ list_users() {
             continue
         fi
         
-        # Read pre-calculated sizes from temp files
+        # Get size from qgroup (FAST - kernel-maintained data)
         local actual_size="0.00"
-        local apparent_size="0.00"
-        
-        if [ -f "$tmpdir/$user.btrfs" ]; then
-            local data_line=$(cat "$tmpdir/$user.btrfs")
-            local exclusive_raw=$(echo "$data_line" | awk '{print $2}')
-            local shared_raw=$(echo "$data_line" | awk '{print $3}')
-            
-            # Convert to MB using awk (faster than multiple bc calls)
-            actual_size=$(echo "$exclusive_raw $shared_raw" | awk '{
-                exc=$1; shr=$2;
-                # Parse exclusive
-                if (exc ~ /GiB/) { gsub(/[^0-9.]/, "", exc); exc = exc * 1024 }
-                else if (exc ~ /MiB/) { gsub(/[^0-9.]/, "", exc) }
-                else if (exc ~ /KiB/) { gsub(/[^0-9.]/, "", exc); exc = exc / 1024 }
-                else { gsub(/[^0-9.]/, "", exc); exc = exc / 1024 / 1024 }
-                # Parse shared
-                if (shr == "-") { shr = 0 }
-                else if (shr ~ /GiB/) { gsub(/[^0-9.]/, "", shr); shr = shr * 1024 }
-                else if (shr ~ /MiB/) { gsub(/[^0-9.]/, "", shr) }
-                else if (shr ~ /KiB/) { gsub(/[^0-9.]/, "", shr); shr = shr / 1024 }
-                else { gsub(/[^0-9.]/, "", shr); shr = shr / 1024 / 1024 }
-                printf "%.2f", exc + shr
-            }')
+        local qgroup_file="$home_dir/.terminas-qgroup"
+        if [ -f "$qgroup_file" ]; then
+            local uploads_qgroup=$(cat "$qgroup_file" 2>/dev/null)
+            if [ -n "$uploads_qgroup" ] && [ -n "${QGROUP_SIZES[$uploads_qgroup]:-}" ]; then
+                local qdata="${QGROUP_SIZES[$uploads_qgroup]}"
+                local rfer_bytes=$(echo "$qdata" | awk '{print $1}')
+                actual_size=$(awk "BEGIN {printf \"%.2f\", $rfer_bytes / 1024 / 1024}")
+            fi
         fi
         
-        # Fallback to du if btrfs failed
-        if [ "$actual_size" = "0.00" ] || [ -z "$actual_size" ]; then
-            actual_size=$(du -sm "$home_dir" 2>/dev/null | awk '{printf "%.2f", $1}')
-            [ -z "$actual_size" ] && actual_size="0.00"
-        fi
-        
-        if [ -f "$tmpdir/$user.apparent" ]; then
-            read uploads_logical snapshots_logical < "$tmpdir/$user.apparent"
-            [ -z "$uploads_logical" ] && uploads_logical="0.00"
-            [ -z "$snapshots_logical" ] && snapshots_logical="0.00"
-            apparent_size=$(awk "BEGIN {printf \"%.2f\", $uploads_logical + $snapshots_logical}")
-        fi
+        # apparent size = actual size (qgroup rfer is the logical/referenced size)
+        local apparent_size="$actual_size"
         
         # Count snapshots (fast - just counts directories)
         local snapshot_count=0
@@ -1756,9 +1715,6 @@ list_users() {
         total_apparent=$(echo "$total_apparent + $apparent_size" | bc)
         total_users=$((total_users + 1))
     done <<< "$users"
-    
-    # Cleanup temp files
-    rm -rf "$tmpdir"
     
     # Print footer with appropriate line length
     if [ "$any_samba" = true ]; then
