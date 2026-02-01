@@ -416,26 +416,55 @@ get_apparent_size() {
 }
 
 # Get last backup date for a user
-get_last_backup_date() {
-    local user="$1"
-    local home_dir="/home/$user"
-    local last_activity=""
-    local activity_epoch=0
+# Get snapshot info (oldest or newest) for a user
+# Args: $1 = username or versions_dir path, $2 = "oldest" or "newest" (default: newest)
+# Returns: "path|epoch|formatted_date" or "||Never" if no snapshots
+# Uses birth time (Btrfs snapshot creation) not modification time
+get_snapshot_info() {
+    local input="$1"
+    local which="${2:-newest}"
+    local versions_dir
     
-    # Check latest snapshot directory (not files in uploads)
-    # This shows when the most recent snapshot was created
-    # Sort by modification time (creation time), not alphabetically
-    # This handles snapshots with non-standard names like test_manual_*
-    if [ -d "$home_dir/versions" ]; then
-        local latest_snapshot=$(find "$home_dir/versions" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-        if [ -n "$latest_snapshot" ]; then
-            activity_epoch=$(stat -c %Y "$latest_snapshot" 2>/dev/null || stat -f %m "$latest_snapshot" 2>/dev/null || echo 0)
-        fi
+    # Support both username and direct path
+    if [[ "$input" == /* ]]; then
+        versions_dir="$input"
+    else
+        versions_dir="/home/$input/versions"
     fi
     
-    if [ "$activity_epoch" -gt 0 ]; then
-        last_activity=$(date -d "@$activity_epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || date -r "$activity_epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
-        echo "$last_activity|$activity_epoch"
+    if [ ! -d "$versions_dir" ]; then
+        echo "||Never"
+        return
+    fi
+    
+    # Sort by birth time (actual snapshot creation), not modification time
+    # This correctly handles users with files in subdirectories
+    # %W = birth time in epoch seconds (Btrfs supports this)
+    local sort_cmd="tail -1"
+    [ "$which" = "oldest" ] && sort_cmd="head -1"
+    
+    local snapshot=$(for d in "$versions_dir"/*/; do [ -d "$d" ] && echo "$(stat -c %W "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null) $d"; done 2>/dev/null | sort -n | $sort_cmd | cut -d' ' -f2-)
+    
+    if [ -n "$snapshot" ] && [ -d "$snapshot" ]; then
+        # Use birth time (%W) for actual snapshot creation, fall back to mtime if unavailable
+        local epoch=$(stat -c %W "$snapshot" 2>/dev/null || stat -c %Y "$snapshot" 2>/dev/null || stat -f %m "$snapshot" 2>/dev/null || echo 0)
+        local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "$epoch" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "Unknown")
+        echo "$snapshot|$epoch|$formatted"
+    else
+        echo "||Never"
+    fi
+}
+
+get_last_backup_date() {
+    local user="$1"
+    local info=$(get_snapshot_info "$user" "newest")
+    local epoch=$(echo "$info" | cut -d'|' -f2)
+    local formatted=$(echo "$info" | cut -d'|' -f3)
+    
+    if [ -n "$epoch" ] && [ "$epoch" -gt 0 ] 2>/dev/null; then
+        # Reformat to match expected output format (without seconds)
+        local short_date=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || date -r "$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$formatted")
+        echo "$short_date|$epoch"
     else
         echo "Never|0"
     fi
@@ -1983,20 +2012,22 @@ info_user() {
         echo "Snapshots: $snapshot_count"
         
         if [ "$snapshot_count" -gt 0 ]; then
-            # Sort by modification time (creation time of snapshot), not alphabetically
-            # This handles snapshots with non-standard names like test_manual_*
-            local oldest=$(find "$versions_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2-)
-            local newest=$(find "$versions_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            # Use shared get_snapshot_info function for consistent birth time handling
+            local oldest_info=$(get_snapshot_info "$versions_dir" "oldest")
+            local oldest=$(echo "$oldest_info" | cut -d'|' -f1)
+            local oldest_date=$(echo "$oldest_info" | cut -d'|' -f3)
             
-            if [ -n "$oldest" ]; then
+            local newest_info=$(get_snapshot_info "$versions_dir" "newest")
+            local newest=$(echo "$newest_info" | cut -d'|' -f1)
+            local newest_date=$(echo "$newest_info" | cut -d'|' -f3)
+            
+            if [ -n "$oldest" ] && [ "$oldest_date" != "Never" ]; then
                 echo "  Oldest:  $(basename "$oldest")"
-                local oldest_date=$(stat -c %y "$oldest" 2>/dev/null | cut -d. -f1 || stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$oldest" 2>/dev/null)
                 echo "           Created: $oldest_date"
             fi
             
-            if [ -n "$newest" ]; then
+            if [ -n "$newest" ] && [ "$newest_date" != "Never" ]; then
                 echo "  Newest:  $(basename "$newest")"
-                local newest_date=$(stat -c %y "$newest" 2>/dev/null | cut -d. -f1 || stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$newest" 2>/dev/null)
                 echo "           Created: $newest_date"
             fi
         fi
