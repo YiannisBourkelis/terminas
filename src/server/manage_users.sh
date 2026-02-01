@@ -416,10 +416,36 @@ get_apparent_size() {
 }
 
 # Get last backup date for a user
+# Parse snapshot directory name to extract timestamp
+# Btrfs snapshots preserve the original subvolume's metadata (birth/modify times),
+# so we must parse the snapshot name (YYYY-MM-DD_HH-MM-SS) to get actual creation time
+# Args: $1 = snapshot directory path or name
+# Returns: "epoch|formatted_date" or "0|Unknown" if parsing fails
+parse_snapshot_timestamp() {
+    local snapshot="$1"
+    local name=$(basename "$snapshot")
+    
+    # Extract date/time from snapshot name format: YYYY-MM-DD_HH-MM-SS
+    if [[ "$name" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})_([0-9]{2})-([0-9]{2})-([0-9]{2})$ ]]; then
+        local year="${BASH_REMATCH[1]}"
+        local month="${BASH_REMATCH[2]}"
+        local day="${BASH_REMATCH[3]}"
+        local hour="${BASH_REMATCH[4]}"
+        local min="${BASH_REMATCH[5]}"
+        local sec="${BASH_REMATCH[6]}"
+        
+        local formatted="$year-$month-$day $hour:$min:$sec"
+        local epoch=$(date -d "$formatted" "+%s" 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$formatted" "+%s" 2>/dev/null || echo 0)
+        echo "$epoch|$formatted"
+    else
+        echo "0|Unknown"
+    fi
+}
+
 # Get snapshot info (oldest or newest) for a user
 # Args: $1 = username or versions_dir path, $2 = "oldest" or "newest" (default: newest)
 # Returns: "path|epoch|formatted_date" or "||Never" if no snapshots
-# Uses birth time (Btrfs snapshot creation) not modification time
+# Parses snapshot directory name (YYYY-MM-DD_HH-MM-SS) for accurate creation time
 get_snapshot_info() {
     local input="$1"
     local which="${2:-newest}"
@@ -437,18 +463,26 @@ get_snapshot_info() {
         return
     fi
     
-    # Sort by birth time (actual snapshot creation), not modification time
-    # This correctly handles users with files in subdirectories
-    # %W = birth time in epoch seconds (Btrfs supports this)
+    # Build list of snapshots with parsed timestamps from directory names
+    # This is reliable because Btrfs snapshots preserve original subvolume metadata
     local sort_cmd="tail -1"
     [ "$which" = "oldest" ] && sort_cmd="head -1"
     
-    local snapshot=$(for d in "$versions_dir"/*/; do [ -d "$d" ] && echo "$(stat -c %W "$d" 2>/dev/null || stat -c %Y "$d" 2>/dev/null) $d"; done 2>/dev/null | sort -n | $sort_cmd | cut -d' ' -f2-)
+    local snapshot_list=""
+    for d in "$versions_dir"/*/; do
+        if [ -d "$d" ]; then
+            local ts_info=$(parse_snapshot_timestamp "$d")
+            local epoch=$(echo "$ts_info" | cut -d'|' -f1)
+            snapshot_list+="$epoch $d"$'\n'
+        fi
+    done
+    
+    local snapshot=$(echo -n "$snapshot_list" | sort -n | $sort_cmd | cut -d' ' -f2-)
     
     if [ -n "$snapshot" ] && [ -d "$snapshot" ]; then
-        # Use birth time (%W) for actual snapshot creation, fall back to mtime if unavailable
-        local epoch=$(stat -c %W "$snapshot" 2>/dev/null || stat -c %Y "$snapshot" 2>/dev/null || stat -f %m "$snapshot" 2>/dev/null || echo 0)
-        local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || date -r "$epoch" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "Unknown")
+        local ts_info=$(parse_snapshot_timestamp "$snapshot")
+        local epoch=$(echo "$ts_info" | cut -d'|' -f1)
+        local formatted=$(echo "$ts_info" | cut -d'|' -f2)
         echo "$snapshot|$epoch|$formatted"
     else
         echo "||Never"
