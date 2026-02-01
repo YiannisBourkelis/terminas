@@ -544,6 +544,8 @@ build_connection_cache() {
     if command -v journalctl &>/dev/null; then
         # Get all accepted authentications in last 90 days, extract username and timestamp
         # Use awk for efficient single-pass processing
+        # Note: journalctl timestamps don't include year, so we need to handle year rollover
+        local current_epoch=$(date +%s)
         while IFS='|' read -r user epoch; do
             if [ -n "$user" ] && [ "$epoch" -gt 0 ]; then
                 local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
@@ -551,7 +553,10 @@ build_connection_cache() {
             fi
         done < <(journalctl -u ssh.service --since "90 days ago" 2>/dev/null | \
         grep -i "Accepted password for\|Accepted publickey for" | \
-        awk '
+        awk -v current_epoch="$current_epoch" '
+        BEGIN {
+            one_year = 31536000  # seconds in a year
+        }
         {
             # Extract timestamp (fields 1-3: Oct 10 08:15:30)
             ts = $1 " " $2 " " $3
@@ -573,6 +578,10 @@ build_connection_cache() {
                         cmd = "date -d \"" ts "\" +%s 2>/dev/null"
                         cmd | getline epoch_ts
                         close(cmd)
+                        # Fix year rollover: if date is in the future, it is from last year
+                        if (epoch_ts > current_epoch) {
+                            epoch_ts = epoch_ts - one_year
+                        }
                         epoch_cache[ts] = epoch_ts
                     } else {
                         epoch_ts = epoch_cache[ts]
@@ -595,13 +604,18 @@ build_connection_cache() {
     
     # Fallback to auth.log if available
     if [ -f /var/log/auth.log ]; then
+        # Note: auth.log timestamps don't include year, so we need to handle year rollover
+        local current_epoch=$(date +%s)
         while IFS='|' read -r user epoch; do
             if [ -n "$user" ] && [ "$epoch" -gt 0 ]; then
                 local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
                 CONNECTION_CACHE[$user]="$formatted|$epoch"
             fi
         done < <(grep -i "Accepted password for\|Accepted publickey for" /var/log/auth.log 2>/dev/null | \
-        awk '
+        awk -v current_epoch="$current_epoch" '
+        BEGIN {
+            one_year = 31536000  # seconds in a year
+        }
         {
             ts = $1 " " $2 " " $3
             # Use mawk-compatible approach
@@ -620,6 +634,10 @@ build_connection_cache() {
                         cmd = "date -d \"" ts "\" +%s 2>/dev/null"
                         cmd | getline epoch_ts
                         close(cmd)
+                        # Fix year rollover: if date is in the future, it is from last year
+                        if (epoch_ts > current_epoch) {
+                            epoch_ts = epoch_ts - one_year
+                        }
                         epoch_cache[ts] = epoch_ts
                     } else {
                         epoch_ts = epoch_cache[ts]
@@ -712,9 +730,15 @@ build_samba_connection_cache() {
             
             if [ -n "$timestamp" ]; then
                 # Convert to epoch - GNU date format
-                # Format should be: "2025-10-12 01:24:03" or "Oct 12 01:24:03 2025"
+                # Note: Log timestamps don't include year, so we need to handle year rollover
                 local current_year=$(date +%Y)
+                local current_epoch=$(date +%s)
                 local epoch=$(date -d "$timestamp $current_year" +%s 2>/dev/null || echo 0)
+                
+                # If parsed date is in the future, it's from last year
+                if [ "$epoch" -gt "$current_epoch" ]; then
+                    epoch=$((epoch - 31536000))  # Subtract one year (365 days in seconds)
+                fi
                 
                 if [ "$epoch" -gt 0 ]; then
                     local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
