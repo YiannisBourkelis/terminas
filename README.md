@@ -659,6 +659,8 @@ testuser_ENABLE_ADVANCED_RETENTION=false
 testuser_RETENTION_DAYS=7
 ```
 
+> **Note:** For usernames containing dashes (e.g., `backup-server`), replace dashes with underscores in the variable name (e.g., `backup_server_KEEP_DAILY=14`).
+
 The cleanup script runs daily at 3:00 AM (configurable via `CLEANUP_HOUR` in the config file).
 
 **Manual cleanup:**
@@ -708,6 +710,8 @@ produser_QUOTA_GB=500
 # Quota warning threshold (%)
 QUOTA_WARN_THRESHOLD=90
 ```
+
+> **Note:** For usernames containing dashes (e.g., `backup-server`), replace dashes with underscores in the variable name (e.g., `backup_server_QUOTA_GB=100`).
 
 **How quota enforcement works:**
 

@@ -2092,11 +2092,14 @@ info_user() {
         source /etc/terminas-retention.conf
         local has_custom=false
         
-        local user_daily_var="${username}_KEEP_DAILY"
-        local user_weekly_var="${username}_KEEP_WEEKLY"
-        local user_monthly_var="${username}_KEEP_MONTHLY"
-        local user_retention_var="${username}_RETENTION_DAYS"
-        local user_advanced_var="${username}_ENABLE_ADVANCED_RETENTION"
+        # Replace dashes with underscores for valid bash variable names
+        local safe_username="${username//-/_}"
+        
+        local user_daily_var="${safe_username}_KEEP_DAILY"
+        local user_weekly_var="${safe_username}_KEEP_WEEKLY"
+        local user_monthly_var="${safe_username}_KEEP_MONTHLY"
+        local user_retention_var="${safe_username}_RETENTION_DAYS"
+        local user_advanced_var="${safe_username}_ENABLE_ADVANCED_RETENTION"
         
         if [ -n "${!user_daily_var}" ] || [ -n "${!user_weekly_var}" ] || [ -n "${!user_monthly_var}" ] || \
            [ -n "${!user_retention_var}" ] || [ -n "${!user_advanced_var}" ]; then
