@@ -246,7 +246,7 @@ echo "Local path: \$LOCAL_PATH" >> "\$LOG_FILE"
     --password "\$BACKUP_PASSWORD" \\
     --dest-path "\$DEST_PATH" \\
     --server "\$BACKUP_SERVER" \\
-    >> "\$LOG_FILE" 2>&1
+    --log-file "\$LOG_FILE"
 
 EXIT_CODE=\$?
 
@@ -289,33 +289,35 @@ else
     print_success "Added cron job to run daily at $BACKUP_TIME"
 fi
 
-# Check if lftp is installed
-echo ""
-print_info "Checking dependencies..."
-if ! command -v lftp &> /dev/null; then
-    print_warning "lftp is not installed (recommended for better upload performance)"
-    read -p "Would you like to install lftp now? (y/n): " INSTALL_LFTP
-    if [[ "$INSTALL_LFTP" =~ ^[Yy]$ ]]; then
-        if command -v apt-get &> /dev/null; then
-            apt-get update && apt-get install -y lftp
-            print_success "Installed lftp"
+# Check if rclone is installed
+if ! command -v rclone &> /dev/null; then
+    print_warning "rclone is not installed (required for backups)"
+    read -p "Would you like to install rclone now? (y/n): " INSTALL_RCLONE
+    if [[ "$INSTALL_RCLONE" =~ ^[Yy]$ ]]; then
+        print_info "Attempting to install rclone..."
+        if command -v curl &> /dev/null; then
+            curl https://rclone.org/install.sh | bash
+            if [ $? -eq 0 ]; then
+                print_success "Installed rclone"
+            else
+                print_error "Failed to install rclone via script"
+            fi
+        elif command -v apt-get &> /dev/null; then
+            apt-get update && apt-get install -y rclone
+            print_success "Installed rclone via apt"
         elif command -v yum &> /dev/null; then
-            yum install -y lftp
-            print_success "Installed lftp"
+            yum install -y rclone
+            print_success "Installed rclone via yum"
         else
-            print_warning "Could not install lftp automatically. Please install it manually."
+            print_error "Cloud not install rclone automatically. Please install it manually from https://rclone.org/install/"
+            exit 1
         fi
     else
-        print_info "Using sshpass + sftp as fallback (install lftp later for better performance)"
+        print_error "rclone is required. Please install it manually and run this script again."
+        exit 1
     fi
 else
-    print_success "lftp is installed"
-fi
-
-if ! command -v sshpass &> /dev/null; then
-    print_warning "sshpass is not installed (fallback if lftp is not available)"
-else
-    print_success "sshpass is installed"
+    print_success "rclone is installed"
 fi
 
 echo ""

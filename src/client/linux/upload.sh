@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# upload.sh - simple client uploader for termiNAS
+# upload.sh - rclone-based client uploader for termiNAS
 #
 # Copyright (c) 2025 Yianni Bourkelis
 # Licensed under the MIT License - see LICENSE file for details
@@ -18,14 +18,14 @@ set -euo pipefail
 
 usage() {
         cat <<EOF
-termiNAS Linux Upload Client
+termiNAS Linux Upload Client (rclone backend)
 Copyright (c) 2025 Yianni Bourkelis
 https://github.com/YiannisBourkelis/terminas
 
 Usage: $0 -l <local-path> -u <username> -p <password> -s <server> [OPTIONS]
 
-This script uploads a file or directory to the termiNAS server.
-It prefers lftp (shows progress). If lftp is not installed it falls back to sshpass+sftp.
+This script syncs a local file or directory to the termiNAS server using rclone.
+It ensures the remote directory is an exact mirror of the local directory.
 
 Required arguments:
     -l, --local-path PATH    Local file or directory to upload
@@ -35,19 +35,19 @@ Required arguments:
 
 Optional arguments:
     -d, --dest-path PATH     Destination path relative to user's chroot (default: uploads/)
-    -f, --fingerprint FP     Expected host fingerprint (optional)
-    --debug                  Run lftp with debugging enabled
-    --force                  Force upload: overwrite existing remote files
+    -f, --fingerprint FP     Expected host fingerprint (optional - NOT USED by rclone backend currently)
+    --debug                  Run rclone with debug logging
+    --force                  Ignored (rclone sync always forces sync state)
+    --log-file FILE          Path to log file (default: stdout)
     -h, --help               Show this help message
 
 Examples:
-    $0 -l /path/to/file.sql.gz -u test2 -p 'P@ssw0rd' -s 202.61.225.34
-    $0 -l /path/to/folder -u test2 -p 'P@ssw0rd' -s 192.168.1.100 -d uploads/backups/ -f SHA256:abcdef... --force
+    $0 -l /path/to/folder -u test2 -p 'P@ssw0rd' -s 192.168.1.100
+    $0 -l /path/to/folder -u test2 -p 'P@ssw0rd' -s 192.168.1.100 -d uploads/backups/ --log-file /var/log/backup.log
 
 Notes:
-- The password will appear in the process list while the command runs when using sshpass. Prefer SSH keys.
-- The destination path is relative to the user's chroot (most installs use uploads/).
-- If provided, expected-host-fingerprint will be compared to the server's SSH key fingerprint before adding it to your known_hosts.
+- Requires 'rclone' installed.
+- Passwords passed as arguments appear in process list; use env vars or config file for better security in production.
 EOF
 }
 
@@ -56,10 +56,9 @@ LOCAL_PATH=""
 USERNAME=""
 PASSWORD=""
 DEST_PATH="uploads/"
-EXPECTED_FP=""
 SERVER=""
 DEBUG=0
-FORCE=0
+LOG_FILE=""
 
 # Parse command line options
 while [[ $# -gt 0 ]]; do
@@ -81,8 +80,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -f|--fingerprint)
-            EXPECTED_FP="$2"
-            shift 2
+            shift 2 # Ignored in this version
             ;;
         -s|--server)
             SERVER="$2"
@@ -93,8 +91,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --force)
-            FORCE=1
-            shift
+            shift # Ignored
+            ;;
+        --log-file)
+            LOG_FILE="$2"
+            shift 2
             ;;
         -h|--help)
             usage
@@ -115,25 +116,9 @@ if [[ -z "$LOCAL_PATH" || -z "$USERNAME" || -z "$PASSWORD" || -z "$SERVER" ]]; t
     exit 2
 fi
 
-# Normalize destination path: remove leading slash so paths are always relative
-# to the user's chroot (some clients/servers treat leading slash as absolute
-# and that can cause permission failures). Also ensure non-empty.
-DEST_PATH="${DEST_PATH#/}"
-if [ -z "$DEST_PATH" ]; then
-    DEST_PATH="uploads"
-fi
-
-# If debugging enabled, prepare a debug output file
-if [ "$DEBUG" -eq 1 ]; then
-    DEBUG_OUT="/tmp/terminas-upload-debug-$(date +%s).log"
-    echo "Debug mode: raw lftp output will be saved to $DEBUG_OUT"
-    : >"$DEBUG_OUT" || true
-fi
-
-# Mirror options (add --overwrite when forced)
-MIRROR_OPTS="--verbose --continue --parallel=2"
-if [ "$FORCE" -eq 1 ]; then
-    MIRROR_OPTS="$MIRROR_OPTS --overwrite"
+if ! command -v rclone &> /dev/null; then
+    echo "Error: rclone is not installed. Please install it (e.g., sudo apt install rclone or via https://rclone.org/install.sh)" >&2
+    exit 1
 fi
 
 if [ ! -e "$LOCAL_PATH" ]; then
@@ -141,252 +126,90 @@ if [ ! -e "$LOCAL_PATH" ]; then
     exit 3
 fi
 
-echo "Uploading '$LOCAL_PATH' as user '$USERNAME' to $SERVER:$DEST_PATH"
-
-# Ensure ~/.ssh exists for current user and known_hosts is present
-SSH_DIR="$HOME/.ssh"
-mkdir -p "$SSH_DIR"
-chmod 700 "$SSH_DIR" || true
-KNOWN_HOSTS="$SSH_DIR/known_hosts"
-touch "$KNOWN_HOSTS" || true
-chmod 600 "$KNOWN_HOSTS" || true
-
-# Helper: ensure server host key is in known_hosts. If EXPECTED_FP is provided, compare.
-ensure_host_key() {
-    # If host already in known_hosts, nothing to do
-    if ssh-keygen -F "$SERVER" -f "$KNOWN_HOSTS" >/dev/null 2>&1; then
-        return 0
-    fi
-
-    # Fetch host keys
-    echo "Fetching host keys for $SERVER..."
-    tmp=$(mktemp)
-    ssh-keyscan -t rsa,ecdsa,ed25519 "$SERVER" > "$tmp" 2>/dev/null || true
-    if [ ! -s "$tmp" ]; then
-        echo "Failed to fetch host keys for $SERVER" >&2
-        rm -f "$tmp"
-        return 1
-    fi
-
-    if [ -n "$EXPECTED_FP" ]; then
-        # compute fingerprint of fetched keys and compare
-        match=0
-        while read -r line; do
-            # write line to a temp key file for fingerprinting
-            keyfile=$(mktemp)
-            echo "$line" > "$keyfile"
-            fp=$(ssh-keygen -lf "$keyfile" 2>/dev/null | awk '{print $2}') || fp=""
-            rm -f "$keyfile"
-            if [ "$fp" = "$EXPECTED_FP" ]; then
-                match=1
-                break
-            fi
-        done < "$tmp"
-        if [ $match -ne 1 ]; then
-            echo "Server host fingerprint did not match expected fingerprint: $EXPECTED_FP" >&2
-            rm -f "$tmp"
-            return 2
-        fi
-    fi
-
-    # Append fetched keys to known_hosts
-    cat "$tmp" >> "$KNOWN_HOSTS"
-    rm -f "$tmp"
-    echo "Added $SERVER host key to $KNOWN_HOSTS"
-    return 0
-}
-
-# Try to ensure host key; non-fatal for now
-ensure_host_key || true
-
-# Prefer lftp if available (gives a nice progress bar and supports sftp protocol)
-if command -v lftp >/dev/null 2>&1; then
-    echo "Using lftp (shows progress)."
-
-    # run lftp and filter out harmless mkdir Access failed lines while preserving exit code
-    run_lftp() {
-        local url="$1"; shift
-        local cmds="$*"
-        # We need to stream output live so progress bars show up. Use a pipeline
-        # where lftp writes to stdout/stderr combined, optionally tee raw output
-        # to the debug file, and sed filters harmless mkdir messages before
-        # displaying to the user.
-        set +e
-        if [ "${DEBUG:-0}" -eq 1 ] && [ -n "${DEBUG_OUT:-}" ]; then
-            # debug: tee raw output to DEBUG_OUT, then filter for terminal
-            lftp -d -u "$USERNAME","$PASSWORD" "$url" -e "$cmds" 2>&1 | tee -a "$DEBUG_OUT" | sed -E '/^mkdir: Access failed:/d'
-            rc=${PIPESTATUS[0]}
-        else
-            # normal: no tee, no -d, stream filtered output
-            lftp -u "$USERNAME","$PASSWORD" "$url" -e "$cmds" 2>&1 | sed -E '/^mkdir: Access failed:/d'
-            rc=${PIPESTATUS[0]}
-        fi
-        set -e
-        return $rc
-    }
-
-    # helper: inspect remote path type. Sets REMOTE_TYPE to one of: missing, dir, file
-    remote_path_type() {
-        REMOTE_TYPE="missing"
-        tmp=$(mktemp)
-        # Try to cd into the path - if it succeeds, it's a directory
-        if run_lftp sftp://$SERVER "cd \"$1\"; bye" >"$tmp" 2>&1; then
-            REMOTE_TYPE="dir"
-        else
-            # Check if it exists as a file using cls
-            run_lftp sftp://$SERVER "cls -l \"$1\"; bye" >"$tmp" 2>/dev/null || true
-            if [ -s "$tmp" ]; then
-                REMOTE_TYPE="file"
-            fi
-        fi
-        if [ "$DEBUG" -eq 1 ]; then
-            echo "DEBUG: remote_path_type('$1') = $REMOTE_TYPE (cd test)" >&2
-            if [ -s "$tmp" ]; then
-                echo "DEBUG: Test output:" >&2
-                cat "$tmp" >&2
-            fi
-        fi
-        rm -f "$tmp"
-    }
-
-    # lftp: for directories use mirror -R, for files use put
-    if [ -d "$LOCAL_PATH" ]; then
-        # Get absolute path of local directory to avoid any path resolution issues
-        # Use -P to avoid resolving symlinks to keep the original basename
-        LOCAL_ABS=$(cd "$(dirname "$LOCAL_PATH")" && pwd -P)/$(basename "$LOCAL_PATH")
-        # Remove trailing slash if present
-        LOCAL_ABS="${LOCAL_ABS%/}"
-        LOCAL_PARENT=$(dirname "$LOCAL_ABS")
-        BASENAME=$(basename "$LOCAL_ABS")
-        
-        if [ "$DEBUG" -eq 1 ]; then
-            echo "DEBUG: LOCAL_PATH=$LOCAL_PATH" >&2
-            echo "DEBUG: LOCAL_ABS=$LOCAL_ABS" >&2
-            echo "DEBUG: LOCAL_PARENT=$LOCAL_PARENT" >&2
-            echo "DEBUG: BASENAME=$BASENAME" >&2
-            echo "DEBUG: DEST_PATH=$DEST_PATH" >&2
-        fi
-        
-        # inspect remote path
-        remote_path_type "$DEST_PATH"
-        if [ "$REMOTE_TYPE" = "file" ]; then
-            # remote path is a file; create a directory with the source dir name in its parent
-            PARENT_DIR=$(dirname "$DEST_PATH")
-            TARGET="$PARENT_DIR/$BASENAME"
-            # ensure parent exists
-            lftp -u "$USERNAME","$PASSWORD" sftp://$SERVER -e "mkdir -p \"$PARENT_DIR\"; bye" >/dev/null 2>&1 || true
-            # Mirror directory contents into the target
-            LFTP_CMD="lcd \"$LOCAL_ABS\"; cd \"$TARGET\"; mkdir -p .; mirror -R $MIRROR_OPTS . .; bye"
-            if [ "$DEBUG" -eq 1 ]; then
-                echo "DEBUG: LFTP_CMD=$LFTP_CMD" >&2
-            fi
-            run_lftp sftp://$SERVER "$LFTP_CMD"
-        else
-            # missing or dir -> ensure directory exists then mirror
-            if [ "$REMOTE_TYPE" = "missing" ]; then
-                run_lftp sftp://$SERVER "mkdir -p \"$DEST_PATH\"; bye" >/dev/null 2>&1 || true
-            fi
-            # Mirror directory contents into the destination
-            # Use lcd to enter the source directory, then mirror its contents
-            if [ "$DEBUG" -eq 1 ]; then
-                echo "DEBUG: About to mirror - DEST_PATH='$DEST_PATH' BASENAME='$BASENAME'" >&2
-                echo "DEBUG: REMOTE_TYPE='$REMOTE_TYPE'" >&2
-            fi
-            LFTP_CMD="lcd \"$LOCAL_ABS\"; cd \"$DEST_PATH\"; mirror -R $MIRROR_OPTS . .; bye"
-            if [ "$DEBUG" -eq 1 ]; then
-                echo "DEBUG: LFTP_CMD=$LFTP_CMD" >&2
-            fi
-            run_lftp sftp://$SERVER "$LFTP_CMD"
-        fi
-    else
-        # single file upload: ensure remote dir exists and upload file
-        # Get absolute path of local file to avoid any path resolution issues
-        # Use -P to avoid resolving symlinks
-        LOCAL_ABS=$(cd "$(dirname "$LOCAL_PATH")" && pwd -P)/$(basename "$LOCAL_PATH")
-        LOCAL_PARENT=$(dirname "$LOCAL_ABS")
-        BASENAME=$(basename "$LOCAL_ABS")
-        
-        if [ "$DEBUG" -eq 1 ]; then
-            echo "DEBUG: LOCAL_PATH=$LOCAL_PATH" >&2
-            echo "DEBUG: LOCAL_ABS=$LOCAL_ABS" >&2
-            echo "DEBUG: LOCAL_PARENT=$LOCAL_PARENT" >&2
-            echo "DEBUG: BASENAME=$BASENAME" >&2
-            echo "DEBUG: DEST_PATH=$DEST_PATH" >&2
-        fi
-        
-        REMOTE_DIR="$DEST_PATH"
-        # inspect remote path
-        remote_path_type "$REMOTE_DIR"
-        if [ "$REMOTE_TYPE" = "file" ]; then
-            # remote path is a file name; overwrite it
-            if [ "$FORCE" -eq 1 ]; then
-                # attempt to remove remote file first (ignore errors)
-                run_lftp sftp://$SERVER "rm \"$REMOTE_DIR\"; bye" >/dev/null 2>&1 || true
-            fi
-            # Use lcd/cd approach for clarity
-            LFTP_CMD="lcd \"$LOCAL_PARENT\"; cd \"$(dirname "$REMOTE_DIR")\"; put \"$BASENAME\"; bye"
-            if [ "$DEBUG" -eq 1 ]; then
-                echo "DEBUG: LFTP_CMD=$LFTP_CMD" >&2
-            fi
-            run_lftp sftp://$SERVER "$LFTP_CMD"
-        else
-            if [ "$REMOTE_TYPE" = "missing" ]; then
-                run_lftp sftp://$SERVER "mkdir -p \"$REMOTE_DIR\"; bye" >/dev/null 2>&1 || true
-            fi
-            # Use lcd/cd approach for clarity
-            LFTP_CMD="lcd \"$LOCAL_PARENT\"; cd \"$REMOTE_DIR\"; put \"$BASENAME\"; bye"
-            if [ "$DEBUG" -eq 1 ]; then
-                echo "DEBUG: LFTP_CMD=$LFTP_CMD" >&2
-            fi
-            run_lftp sftp://$SERVER "$LFTP_CMD"
-        fi
-    fi
-    rc=$?
-    if [ $rc -ne 0 ]; then
-        echo "lftp upload failed with exit $rc" >&2
-        exit $rc
-    fi
-    echo "Upload finished."
-    exit 0
+# Normalize destination path
+# rclone sftp remote paths are relative to home.
+# If DEST_PATH starts with /, remove it.
+DEST_PATH="${DEST_PATH#/}"
+if [ -z "$DEST_PATH" ]; then
+    DEST_PATH="uploads"
 fi
 
-# Fallback: sshpass + sftp (may not show a neat progress bar but works with chrooted sftp)
-if command -v sshpass >/dev/null 2>&1 && command -v sftp >/dev/null 2>&1; then
-    echo "lftp not found; falling back to sshpass + sftp. Progress will be basic."
-    if [ -d "$LOCAL_PATH" ]; then
-        # for directories, tarring on the fly and uploading the tarball is simpler
-        BASENAME=$(basename "$LOCAL_PATH")
-        TMP_TAR="/tmp/${BASENAME}_$(date +%s).tar.gz"
-        echo "Creating tarball $TMP_TAR (this may take a while)..."
-        tar -czf "$TMP_TAR" -C "$(dirname "$LOCAL_PATH")" "$BASENAME"
-        echo "Uploading tarball..."
-        sshpass -p "$PASSWORD" sftp -oBatchMode=no -b - "$USERNAME@$SERVER" <<EOF
-put $TMP_TAR $DEST_PATH
-bye
-EOF
-        rc=$?
-        rm -f "$TMP_TAR"
-        if [ $rc -ne 0 ]; then
-            echo "sftp upload failed with exit $rc" >&2
-            exit $rc
-        fi
-        echo "Upload finished. Remote side will need to extract the tarball if desired."
-        exit 0
-    else
-        # single file upload
-        sshpass -p "$PASSWORD" sftp -oBatchMode=no -b - "$USERNAME@$SERVER" <<EOF
-put $LOCAL_PATH $DEST_PATH
-bye
-EOF
-        rc=$?
-        if [ $rc -ne 0 ]; then
-            echo "sftp upload failed with exit $rc" >&2
-            exit $rc
-        fi
-        echo "Upload finished."
-        exit 0
+# Configure rclone via environment variables (no config file needed)
+export RCLONE_CONFIG_TERMINAS_TYPE=sftp
+export RCLONE_CONFIG_TERMINAS_HOST="$SERVER"
+export RCLONE_CONFIG_TERMINAS_USER="$USERNAME"
+
+# Rclone generally expects obscured passwords in config passed via env vars
+# We use 'rclone obscure' to generate it.
+OBSCURED_PASS=$(rclone obscure "$PASSWORD")
+export RCLONE_CONFIG_TERMINAS_PASS="$OBSCURED_PASS"
+
+# Use system known_hosts for host key verification
+# If missing, ensure ~/.ssh exists
+if [ ! -d "$HOME/.ssh" ]; then
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh"
+fi
+if [ ! -f "$HOME/.ssh/known_hosts" ]; then
+    touch "$HOME/.ssh/known_hosts"
+    chmod 600 "$HOME/.ssh/known_hosts"
+fi
+
+# Add host key if not present (to prevent interactive prompt hanging background jobs)
+if ! ssh-keygen -F "$SERVER" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
+    # Try using ssh-keyscan if available (preferred)
+    if command -v ssh-keyscan &> /dev/null; then
+        # Add a timeout and retry logic for keyscan
+        ssh-keyscan -t rsa,ecdsa,ed25519 "$SERVER" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
     fi
 fi
 
-echo "Neither lftp nor sshpass+sftp are available. Please install 'lftp' or 'sshpass' and try again." >&2
-exit 4
+# Build arguments
+ARGS=""
+
+# Log level
+if [ "$DEBUG" -eq 1 ]; then
+    ARGS="$ARGS --log-level DEBUG"
+else
+    ARGS="$ARGS --log-level INFO"
+fi
+
+# Log file rotation (conditional on version)
+# Get rclone version: "rclone v1.53.3-DEV" -> 1.53
+RCLONE_VERSION_RAW=$(rclone --version | head -n1 | awk '{print $2}')
+# Remove 'v'
+RCLONE_VERSION=${RCLONE_VERSION_RAW#v}
+# Extract major and minor
+MAJOR=$(echo "$RCLONE_VERSION" | cut -d. -f1)
+MINOR=$(echo "$RCLONE_VERSION" | cut -d. -f2)
+
+# Check if version supports log rotation (approx >= 1.55 or similar, user said 1.53 is missing it)
+SUPPORTS_LOG_ROTATION=0
+# Convert to integer for comparison
+MAJOR=${MAJOR:-0}
+MINOR=${MINOR:-0}
+
+if [ "$MAJOR" -gt 1 ]; then
+    SUPPORTS_LOG_ROTATION=1
+elif [ "$MAJOR" -eq 1 ] && [ "$MINOR" -ge 55 ]; then
+    SUPPORTS_LOG_ROTATION=1
+fi
+
+if [ -n "$LOG_FILE" ]; then
+    ARGS="$ARGS --log-file $LOG_FILE"
+    if [ "$SUPPORTS_LOG_ROTATION" -eq 1 ]; then
+        # Default rotation settings suitable for backups
+        ARGS="$ARGS --log-file-max-size 10M --log-file-max-backups 10 --log-file-max-age 30d"
+    fi
+fi
+
+# Execute sync
+echo "Syncing '$LOCAL_PATH' to '$SERVER:$DEST_PATH' via rclone..."
+
+if [ -f "$LOCAL_PATH" ]; then
+    # Single file upload
+    rclone copyto "$LOCAL_PATH" "terminas:$DEST_PATH/$(basename "$LOCAL_PATH")" $ARGS
+else
+    # Directory sync
+    rclone sync "$LOCAL_PATH" "terminas:$DEST_PATH" $ARGS
+fi

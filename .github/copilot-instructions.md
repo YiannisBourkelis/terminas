@@ -201,6 +201,7 @@ Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-perfo
 - Use `[[` for conditionals instead of `[`
 - Validate inputs and check command exit codes
 - Add descriptive comments for complex logic
+- **Always validate syntax**: Run `bash -n <script>` after any modification
 
 **PowerShell Scripts**:
 - Use `[CmdletBinding()]` for advanced function features
