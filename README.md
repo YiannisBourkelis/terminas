@@ -168,36 +168,35 @@ The recommended installation location depends on your use case:
 
 termiNAS includes cross-platform client scripts for easy file uploads:
 
-#### Linux Client (`src/client/linux/upload.sh`)
+#### Linux Client (`src/client/linux/setup-client.sh`)
 The recommended installation location depends on your use case:
 
 **Recommendation:** Use `/opt/terminas` for all production client installations.
 
-Bash script with lftp/sftp support and named parameters:
+Interactive setup script that configures automated rclone-based backups:
 ```bash
-# Upload a file
-./upload.sh -l /data/file.txt -u backupuser -p "pass" -s backup.example.com
-
-# Upload a directory
-./upload.sh -l /data/folder -u backupuser -p "pass" -s backup.example.com -d /backups
-
-# Force upload and enable debug mode
-./upload.sh -l /data/file.txt -u backupuser -p "pass" -s backup.example.com --force --debug
+# Run the interactive setup (requires root)
+sudo ./setup-client.sh
 ```
 
-**Parameters:**
-- `-l, --local-path` (required): File or directory to upload
-- `-u, --user` (required): SFTP username
-- `-p, --password` (required): SFTP password
-- `-s, --server` (required): Server hostname or IP
-- `-d, --dest-path` (optional): Remote path (default: `/uploads`)
-- `-f, --force` (optional): Skip hash check, always upload
-- `--port` (optional): SFTP port (default: 22)
-- `--debug` (optional): Enable debug output
+The setup will prompt for:
+- Local path to backup
+- Backup server hostname/IP
+- Username and password
+- Remote destination path (default: /uploads)
+- Backup schedule time
+- Backup job name
+
+**What it creates:**
+- An rclone remote configuration stored securely in `/root/.config/rclone/rclone.conf`
+- A backup script in `/usr/local/bin/terminas-backup/backup-<jobname>.sh`
+- A cron job for daily automated backups
+- Logrotate configuration for log management
 
 **Features:**
-- SHA-256 hash checking to skip unchanged files
-- Automatic lftp/sftp detection
+- Uses `rclone sync` for efficient directory mirroring (like rsync)
+- Credentials stored securely in rclone config (not visible in process list)
+- Automatic host key handling
 - Mirror mode for directory uploads (uploads contents)
 - Host key auto-acceptance option
 
@@ -1197,12 +1196,22 @@ If you prefer to manually configure scheduled backups:
 **Note:** On Windows versions prior to Windows 10, use rclone v1.63.1 and remove the `--log-file-max-*` flags.
 
 **Linux - Cron Job:**
+
+The recommended approach is to use `setup-client.sh` which automatically creates a cron job:
 ```bash
-# Edit root's crontab
+sudo ./src/client/linux/setup-client.sh
+```
+
+Alternatively, for manual rclone setup:
+```bash
+# Create rclone remote
+rclone config create terminas sftp host backup.example.com user backupuser pass $(rclone obscure "SecurePass123!")
+
+# Add cron job
 sudo crontab -e
 
 # Add this line to run backup daily at 2:00 AM
-0 2 * * * /opt/terminas/src/client/linux/upload.sh -l /var/data -u backupuser -p "SecurePass123!" -s backup.example.com -d /uploads >> /var/log/terminas-backup.log 2>&1
+0 2 * * * rclone sync /var/data terminas:uploads --log-file /var/log/terminas-backup.log --log-level INFO
 
 # Optional: Add log rotation
 # Create /etc/logrotate.d/terminas-backup with:
@@ -1255,7 +1264,7 @@ To modify or extend the scripts:
 - Edit `src/server/setup.sh` for server configuration changes
 - Edit `src/server/create_user.sh` for user setup tweaks
 - Edit `src/server/manage_users.sh` to add new management commands
-- Edit client scripts (`src/client/linux/upload.sh`) for upload behavior
+- Edit client script (`src/client/linux/setup-client.sh`) for backup setup behavior
 - Test in a VM to avoid disrupting production
 
 **Key Files:**
@@ -1263,7 +1272,7 @@ To modify or extend the scripts:
 - `src/server/create_user.sh` - User creation with password generation
 - `src/server/delete_user.sh` - User deletion
 - `src/server/manage_users.sh` - User and snapshot management
-- `src/client/linux/upload.sh` - Linux Bash upload client
+- `src/client/linux/setup-client.sh` - Linux client backup setup (creates rclone config)
 - `/var/terminas/scripts/terminas-monitor.sh` - Real-time snapshot monitor (created by setup)
 - `/var/terminas/scripts/terminas-cleanup.sh` - Retention policy cleanup (created by setup)
 - `/etc/terminas-retention.conf` - Retention configuration (created by setup)
@@ -1303,8 +1312,7 @@ Solution:
 # Accept host key manually first
 ssh-keyscan -H backup.example.com >> ~/.ssh/known_hosts
 
-# Or use --accept-hostkey option in upload script
-./upload.sh -l /data -u user -p pass -s server --accept-hostkey
+# The setup-client.sh script handles this automatically
 ```
 
 ### Server Issues

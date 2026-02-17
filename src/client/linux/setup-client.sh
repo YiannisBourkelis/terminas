@@ -19,7 +19,6 @@ fi
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-UPLOAD_SCRIPT="$SCRIPT_DIR/upload.sh"
 
 # Colors for output
 RED='\033[0;31m'
@@ -57,10 +56,36 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# Check if upload.sh exists
-if [ ! -f "$UPLOAD_SCRIPT" ]; then
-    print_error "upload.sh not found at: $UPLOAD_SCRIPT"
-    exit 1
+# Check if rclone is installed (required dependency)
+if ! command -v rclone &> /dev/null; then
+    print_warning "rclone is not installed (required for backups)"
+    read -p "Would you like to install rclone now? (y/n): " INSTALL_RCLONE
+    if [[ "$INSTALL_RCLONE" =~ ^[Yy]$ ]]; then
+        print_info "Attempting to install rclone..."
+        if command -v apt-get &> /dev/null; then
+            apt-get update && apt-get install -y rclone
+            print_success "Installed rclone via apt"
+        elif command -v dnf &> /dev/null; then
+            dnf install -y rclone
+            print_success "Installed rclone via dnf"
+        elif command -v yum &> /dev/null; then
+            yum install -y rclone
+            print_success "Installed rclone via yum"
+        elif command -v pacman &> /dev/null; then
+            pacman -S --noconfirm rclone
+            print_success "Installed rclone via pacman"
+        elif command -v zypper &> /dev/null; then
+            zypper install -y rclone
+            print_success "Installed rclone via zypper"
+        else
+            print_error "Could not detect a supported package manager (apt, dnf, yum, pacman, zypper)."
+            print_error "Please install rclone manually from your distribution's repository and run this script again."
+            exit 1
+        fi
+    else
+        print_error "rclone is required. Please install it manually and run this script again."
+        exit 1
+    fi
 fi
 
 print_header "termiNAS Client Setup"
@@ -182,24 +207,38 @@ SCRIPTS_DIR="/usr/local/bin/terminas-backup"
 mkdir -p "$SCRIPTS_DIR"
 print_success "Created scripts directory: $SCRIPTS_DIR"
 
-# Create credentials directory
-CREDS_DIR="/root/.terminas-credentials"
-CREDS_FILE="$CREDS_DIR/${BACKUP_NAME}.conf"
-mkdir -p "$CREDS_DIR"
-chmod 700 "$CREDS_DIR"
+# Create rclone remote configuration
+# Remote name uses backup name to allow multiple backup jobs
+RCLONE_REMOTE="terminas-${BACKUP_NAME}"
 
-# Write credentials file
-cat > "$CREDS_FILE" <<EOF
-# termiNAS backup credentials for: $BACKUP_NAME
-# Generated on: $(date '+%Y-%m-%d %H:%M:%S')
-# Copyright (c) 2025 Yianni Bourkelis
+# Ensure rclone config directory exists with secure permissions
+RCLONE_CONFIG_DIR="/root/.config/rclone"
+mkdir -p "$RCLONE_CONFIG_DIR"
+chmod 700 "$RCLONE_CONFIG_DIR"
 
-BACKUP_USERNAME="$BACKUP_USERNAME"
-BACKUP_PASSWORD="$BACKUP_PASSWORD"
-BACKUP_SERVER="$BACKUP_SERVER"
-EOF
-chmod 600 "$CREDS_FILE"
-print_success "Created secure credentials file: $CREDS_FILE"
+print_info "Creating rclone remote: $RCLONE_REMOTE"
+
+# Delete existing remote if it exists (to update credentials)
+rclone config delete "$RCLONE_REMOTE" 2>/dev/null || true
+
+# Create rclone remote using 'rclone config create'
+# This automatically obscures the password and stores it securely
+rclone config create "$RCLONE_REMOTE" sftp \
+    host "$BACKUP_SERVER" \
+    user "$BACKUP_USERNAME" \
+    pass "$(rclone obscure "$BACKUP_PASSWORD")" \
+    --non-interactive
+
+print_success "Created rclone remote: $RCLONE_REMOTE"
+
+# Secure the rclone config file
+chmod 600 "$RCLONE_CONFIG_DIR/rclone.conf" 2>/dev/null || true
+
+# Normalize destination path for rclone (remove leading slash)
+DEST_PATH_NORMALIZED="${DEST_PATH#/}"
+if [ -z "$DEST_PATH_NORMALIZED" ]; then
+    DEST_PATH_NORMALIZED="uploads"
+fi
 
 # Create backup script
 BACKUP_SCRIPT="$SCRIPTS_DIR/backup-${BACKUP_NAME}.sh"
@@ -213,20 +252,12 @@ cat > "$BACKUP_SCRIPT" <<EOF
 # https://github.com/YiannisBourkelis/terminas
 
 LOG_FILE="/var/log/terminas-${BACKUP_NAME}.log"
-UPLOAD_SCRIPT="$UPLOAD_SCRIPT"
-CREDS_FILE="$CREDS_FILE"
 LOCAL_PATH="$LOCAL_PATH"
-DEST_PATH="$DEST_PATH"
+RCLONE_REMOTE="$RCLONE_REMOTE"
+DEST_PATH="$DEST_PATH_NORMALIZED"
 
 # Ensure log directory exists
 mkdir -p "\$(dirname "\$LOG_FILE")"
-
-# Load credentials
-if [ ! -f "\$CREDS_FILE" ]; then
-    echo "ERROR: Credentials file not found: \$CREDS_FILE" >> "\$LOG_FILE"
-    exit 1
-fi
-source "\$CREDS_FILE"
 
 # Check if local path exists
 if [ ! -e "\$LOCAL_PATH" ]; then
@@ -238,15 +269,21 @@ fi
 echo "==========================================" >> "\$LOG_FILE"
 echo "Backup started at \$(date '+%Y-%m-%d %H:%M:%S')" >> "\$LOG_FILE"
 echo "Local path: \$LOCAL_PATH" >> "\$LOG_FILE"
+echo "Remote: \$RCLONE_REMOTE:\$DEST_PATH" >> "\$LOG_FILE"
 
-# Run the upload
-"\$UPLOAD_SCRIPT" \\
-    --local-path "\$LOCAL_PATH" \\
-    --username "\$BACKUP_USERNAME" \\
-    --password "\$BACKUP_PASSWORD" \\
-    --dest-path "\$DEST_PATH" \\
-    --server "\$BACKUP_SERVER" \\
-    --log-file "\$LOG_FILE"
+# Run rclone sync directly using the configured remote
+# Credentials are stored securely in rclone config (not visible in process list)
+if [ -f "\$LOCAL_PATH" ]; then
+    # Single file: use copyto
+    rclone copyto "\$LOCAL_PATH" "\$RCLONE_REMOTE:\$DEST_PATH/\$(basename "\$LOCAL_PATH")" \\
+        --log-file "\$LOG_FILE" \\
+        --log-level INFO
+else
+    # Directory: use sync
+    rclone sync "\$LOCAL_PATH" "\$RCLONE_REMOTE:\$DEST_PATH" \\
+        --log-file "\$LOG_FILE" \\
+        --log-level INFO
+fi
 
 EXIT_CODE=\$?
 
@@ -289,36 +326,7 @@ else
     print_success "Added cron job to run daily at $BACKUP_TIME"
 fi
 
-# Check if rclone is installed
-if ! command -v rclone &> /dev/null; then
-    print_warning "rclone is not installed (required for backups)"
-    read -p "Would you like to install rclone now? (y/n): " INSTALL_RCLONE
-    if [[ "$INSTALL_RCLONE" =~ ^[Yy]$ ]]; then
-        print_info "Attempting to install rclone..."
-        if command -v curl &> /dev/null; then
-            curl https://rclone.org/install.sh | bash
-            if [ $? -eq 0 ]; then
-                print_success "Installed rclone"
-            else
-                print_error "Failed to install rclone via script"
-            fi
-        elif command -v apt-get &> /dev/null; then
-            apt-get update && apt-get install -y rclone
-            print_success "Installed rclone via apt"
-        elif command -v yum &> /dev/null; then
-            yum install -y rclone
-            print_success "Installed rclone via yum"
-        else
-            print_error "Cloud not install rclone automatically. Please install it manually from https://rclone.org/install/"
-            exit 1
-        fi
-    else
-        print_error "rclone is required. Please install it manually and run this script again."
-        exit 1
-    fi
-else
-    print_success "rclone is installed"
-fi
+print_success "rclone is installed"
 
 echo ""
 print_header "Setup Complete!"
@@ -327,7 +335,7 @@ print_success "Backup job '$BACKUP_NAME' has been configured successfully!"
 echo ""
 print_info "Configuration details:"
 echo "  • Backup script:    $BACKUP_SCRIPT"
-echo "  • Credentials:      $CREDS_FILE"
+echo "  • Rclone remote:    $RCLONE_REMOTE (config at /root/.config/rclone/rclone.conf)"
 echo "  • Log file:         /var/log/terminas-${BACKUP_NAME}.log"
 echo "  • Schedule:         Daily at $BACKUP_TIME"
 echo ""
