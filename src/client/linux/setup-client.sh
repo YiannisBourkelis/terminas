@@ -226,8 +226,7 @@ rclone config delete "$RCLONE_REMOTE" 2>/dev/null || true
 rclone config create "$RCLONE_REMOTE" sftp \
     host "$BACKUP_SERVER" \
     user "$BACKUP_USERNAME" \
-    pass "$(rclone obscure "$BACKUP_PASSWORD")" \
-    --non-interactive
+    pass "$(rclone obscure "$BACKUP_PASSWORD")"
 
 print_success "Created rclone remote: $RCLONE_REMOTE"
 
