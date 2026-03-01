@@ -5,7 +5,26 @@ All notable changes to termiNAS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-alpha.4] - 2026-03-02
+
+### Changed
+- **Unified backup clients to use rclone**: Both Linux and Windows clients now use rclone for SFTP backups, providing consistent behavior across platforms.
+- **Refactored Linux client setup**: Removed standalone `upload.sh` script and integrated rclone configuration directly into `setup-client.sh` for a streamlined single-script setup experience.
+- **Simplified Windows client setup**: Replaced PowerShell scripts with rclone-based approach documented in `RCLONE_BACKUP_SETUP.md`.
+- **Optimized `manage_users.sh list` performance**: Replaced parallel `btrfs filesystem du` calls with single qgroup data fetch, improving speed and accuracy of user size calculations.
+- Enhanced snapshot handling with new `parse_snapshot_timestamp` function for accurate extraction of creation times from snapshot directory names.
+- Refactored `get_last_backup_date` to use `get_snapshot_info` for improved consistency.
+
+### Fixed
+- Fixed year rollover handling in `build_connection_cache` and `build_samba_connection_cache` functions for accurate timestamp processing across year boundaries.
+- Added notes for handling usernames with dashes in variable names in setup and manage_users scripts.
+
+### Documentation
+- Added reference documentation section to Linux Client Architecture for rclone.
+- Updated Windows client documentation with comprehensive rclone setup guide.
+
 ## [1.0.0-alpha.3] - 2026-01-11
+
 
 ### Added
 - Hybrid Btrfs simple-quota architecture with migration tooling and documentation to enforce limits across uploads and snapshots.
