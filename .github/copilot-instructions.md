@@ -25,7 +25,7 @@ termiNAS is a secure, versioned backup server for Debian Linux that provides ran
 ### User Experience Goals
 - One-command server setup (`setup.sh`)
 - One-command user creation (`create_user.sh <username>`)
-- Interactive client setup wizards (Linux: `setup-client.sh`, Windows: `setup-client.ps1`)
+- Interactive client setup wizards (Linux: `setup-client.sh`, Windows: rclone guide)
 - Comprehensive management tools (`manage_users.sh` with 9 commands)
 - Clear documentation with troubleshooting guides
 
@@ -38,6 +38,10 @@ terminas/
 ├── README.md                    # Complete project documentation
 ├── PROJECT_REQUIREMENTS.md      # Original requirements and scope
 ├── .cursorrules                 # This file - project instructions
+├── docs/                        # Technical documentation
+│   ├── ARCHITECTURE_PER_USER_INOTIFY.md  # Server inotify monitor design
+│   ├── QUOTA_ARCHITECTURE.md    # Btrfs quota system design
+│   └── LINUX_CLIENT_ARCHITECTURE.md      # Linux client backup system design
 └── src/
     ├── server/                  # Server-side scripts (Debian)
     │   ├── setup.sh            # Main server installation & configuration
@@ -46,11 +50,9 @@ terminas/
     │   └── manage_users.sh     # User/snapshot management (list, info, history, etc.)
     └── client/                  # Client-side scripts
         ├── linux/               # Linux/Unix clients
-        │   ├── setup-client.sh # Interactive automated backup setup
-        │   └── upload.sh       # Manual upload with hash checking
-        └── windows/             # Windows clients (PowerShell)
-            ├── setup-client.ps1 # Interactive automated backup setup
-            └── upload.ps1      # Manual upload with hash checking
+        │   └── setup-client.sh # Interactive automated backup setup (creates rclone config)
+        └── windows/             # Windows clients
+          └── RCLONE_BACKUP_SETUP.md  # rclone-based SFTP backup guide
 
 Server Runtime Files (created by setup.sh):
 /var/terminas/scripts/
@@ -202,6 +204,7 @@ Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-perfo
 - Use `[[` for conditionals instead of `[`
 - Validate inputs and check command exit codes
 - Add descriptive comments for complex logic
+- **Always validate syntax**: Run `bash -n <script>` after any modification
 
 **PowerShell Scripts**:
 - Use `[CmdletBinding()]` for advanced function features
@@ -246,11 +249,12 @@ Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-perfo
 5. Add troubleshooting section if complex
 
 ### Adding a New Client Feature
-1. Update both `upload.sh` (Linux) and `upload.ps1` (Windows) for parity
-2. Update `setup-client.sh` and `setup-client.ps1` if automation needed
-3. Test on multiple client OS versions
-4. Update README.md with examples
-5. Update manual scheduling section if applicable
+1. Review `docs/LINUX_CLIENT_ARCHITECTURE.md` for technical details and file locations
+2. Update Linux client script (`setup-client.sh`) as needed
+3. Update Windows documentation (`src/client/windows/RCLONE_BACKUP_SETUP.md`) for rclone-based backups
+4. Test on multiple client OS versions
+5. Update README.md with examples
+6. Update architecture documentation if adding new files or changing behavior
 
 ### Adding a New Management Command
 1. Add function to `manage_users.sh`

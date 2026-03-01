@@ -1082,6 +1082,8 @@ KEEP_MONTHLY=6      # Keep last 6 monthly snapshots (one per month)
 
 # Per-user overrides (optional)
 # Format: USERNAME_KEEP_DAILY=N, USERNAME_KEEP_WEEKLY=M, USERNAME_KEEP_MONTHLY=Y
+# Note: For usernames with dashes (e.g., backup-server), replace dashes with
+#       underscores in variable names (e.g., backup_server_KEEP_DAILY=30)
 # Example:
 #   produser_KEEP_DAILY=30
 #   produser_KEEP_WEEKLY=12
@@ -1102,6 +1104,8 @@ CLEANUP_HOUR=3
 DEFAULT_QUOTA_GB=0
 
 # Per-user quota overrides (in GB)
+# Note: For usernames with dashes (e.g., backup-server), replace dashes with
+#       underscores in variable names (e.g., backup_server_QUOTA_GB=100)
 # Example:
 #   testuser_QUOTA_GB=50
 #   produser_QUOTA_GB=500

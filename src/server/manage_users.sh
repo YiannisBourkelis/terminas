@@ -402,8 +402,9 @@ get_actual_size() {
 get_apparent_size() {
     local path="$1"
     if [ -d "$path" ]; then
-        # Sum all file sizes using stat and convert directly to MB with awk (avoids bc syntax errors)
-        local mb=$(find "$path" -type f -exec stat -c %s {} \; 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
+        # Use find -printf to get file sizes without spawning a separate process per file
+        # This is MUCH faster than -exec stat for directories with many files
+        local mb=$(find "$path" -type f -printf '%s\n' 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024/1024}')
         if [ -z "$mb" ] || [ "$mb" = "0.00" ]; then
             echo "0.00"
         else
@@ -415,26 +416,89 @@ get_apparent_size() {
 }
 
 # Get last backup date for a user
-get_last_backup_date() {
-    local user="$1"
-    local home_dir="/home/$user"
-    local last_activity=""
-    local activity_epoch=0
+# Parse snapshot directory name to extract timestamp
+# Btrfs snapshots preserve the original subvolume's metadata (birth/modify times),
+# so we must parse the snapshot name (YYYY-MM-DD_HH-MM-SS) to get actual creation time
+# Args: $1 = snapshot directory path or name
+# Returns: "epoch|formatted_date" or "0|Unknown" if parsing fails
+parse_snapshot_timestamp() {
+    local snapshot="$1"
+    local name=$(basename "$snapshot")
     
-    # Check latest snapshot directory (not files in uploads)
-    # This shows when the most recent snapshot was created
-    # Sort by modification time (creation time), not alphabetically
-    # This handles snapshots with non-standard names like test_manual_*
-    if [ -d "$home_dir/versions" ]; then
-        local latest_snapshot=$(find "$home_dir/versions" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
-        if [ -n "$latest_snapshot" ]; then
-            activity_epoch=$(stat -c %Y "$latest_snapshot" 2>/dev/null || stat -f %m "$latest_snapshot" 2>/dev/null || echo 0)
-        fi
+    # Extract date/time from snapshot name format: YYYY-MM-DD_HH-MM-SS
+    if [[ "$name" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})_([0-9]{2})-([0-9]{2})-([0-9]{2})$ ]]; then
+        local year="${BASH_REMATCH[1]}"
+        local month="${BASH_REMATCH[2]}"
+        local day="${BASH_REMATCH[3]}"
+        local hour="${BASH_REMATCH[4]}"
+        local min="${BASH_REMATCH[5]}"
+        local sec="${BASH_REMATCH[6]}"
+        
+        local formatted="$year-$month-$day $hour:$min:$sec"
+        local epoch=$(date -d "$formatted" "+%s" 2>/dev/null || date -j -f "%Y-%m-%d %H:%M:%S" "$formatted" "+%s" 2>/dev/null || echo 0)
+        echo "$epoch|$formatted"
+    else
+        echo "0|Unknown"
+    fi
+}
+
+# Get snapshot info (oldest or newest) for a user
+# Args: $1 = username or versions_dir path, $2 = "oldest" or "newest" (default: newest)
+# Returns: "path|epoch|formatted_date" or "||Never" if no snapshots
+# Parses snapshot directory name (YYYY-MM-DD_HH-MM-SS) for accurate creation time
+get_snapshot_info() {
+    local input="$1"
+    local which="${2:-newest}"
+    local versions_dir
+    
+    # Support both username and direct path
+    if [[ "$input" == /* ]]; then
+        versions_dir="$input"
+    else
+        versions_dir="/home/$input/versions"
     fi
     
-    if [ "$activity_epoch" -gt 0 ]; then
-        last_activity=$(date -d "@$activity_epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || date -r "$activity_epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
-        echo "$last_activity|$activity_epoch"
+    if [ ! -d "$versions_dir" ]; then
+        echo "||Never"
+        return
+    fi
+    
+    # Build list of snapshots with parsed timestamps from directory names
+    # This is reliable because Btrfs snapshots preserve original subvolume metadata
+    local sort_cmd="tail -1"
+    [ "$which" = "oldest" ] && sort_cmd="head -1"
+    
+    local snapshot_list=""
+    for d in "$versions_dir"/*/; do
+        if [ -d "$d" ]; then
+            local ts_info=$(parse_snapshot_timestamp "$d")
+            local epoch=$(echo "$ts_info" | cut -d'|' -f1)
+            snapshot_list+="$epoch $d"$'\n'
+        fi
+    done
+    
+    local snapshot=$(echo -n "$snapshot_list" | sort -n | $sort_cmd | cut -d' ' -f2-)
+    
+    if [ -n "$snapshot" ] && [ -d "$snapshot" ]; then
+        local ts_info=$(parse_snapshot_timestamp "$snapshot")
+        local epoch=$(echo "$ts_info" | cut -d'|' -f1)
+        local formatted=$(echo "$ts_info" | cut -d'|' -f2)
+        echo "$snapshot|$epoch|$formatted"
+    else
+        echo "||Never"
+    fi
+}
+
+get_last_backup_date() {
+    local user="$1"
+    local info=$(get_snapshot_info "$user" "newest")
+    local epoch=$(echo "$info" | cut -d'|' -f2)
+    local formatted=$(echo "$info" | cut -d'|' -f3)
+    
+    if [ -n "$epoch" ] && [ "$epoch" -gt 0 ] 2>/dev/null; then
+        # Reformat to match expected output format (without seconds)
+        local short_date=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || date -r "$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "$formatted")
+        echo "$short_date|$epoch"
     else
         echo "Never|0"
     fi
@@ -480,6 +544,8 @@ build_connection_cache() {
     if command -v journalctl &>/dev/null; then
         # Get all accepted authentications in last 90 days, extract username and timestamp
         # Use awk for efficient single-pass processing
+        # Note: journalctl timestamps don't include year, so we need to handle year rollover
+        local current_epoch=$(date +%s)
         while IFS='|' read -r user epoch; do
             if [ -n "$user" ] && [ "$epoch" -gt 0 ]; then
                 local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
@@ -487,7 +553,10 @@ build_connection_cache() {
             fi
         done < <(journalctl -u ssh.service --since "90 days ago" 2>/dev/null | \
         grep -i "Accepted password for\|Accepted publickey for" | \
-        awk '
+        awk -v current_epoch="$current_epoch" '
+        BEGIN {
+            one_year = 31536000  # seconds in a year
+        }
         {
             # Extract timestamp (fields 1-3: Oct 10 08:15:30)
             ts = $1 " " $2 " " $3
@@ -509,6 +578,10 @@ build_connection_cache() {
                         cmd = "date -d \"" ts "\" +%s 2>/dev/null"
                         cmd | getline epoch_ts
                         close(cmd)
+                        # Fix year rollover: if date is in the future, it is from last year
+                        if (epoch_ts > current_epoch) {
+                            epoch_ts = epoch_ts - one_year
+                        }
                         epoch_cache[ts] = epoch_ts
                     } else {
                         epoch_ts = epoch_cache[ts]
@@ -531,13 +604,18 @@ build_connection_cache() {
     
     # Fallback to auth.log if available
     if [ -f /var/log/auth.log ]; then
+        # Note: auth.log timestamps don't include year, so we need to handle year rollover
+        local current_epoch=$(date +%s)
         while IFS='|' read -r user epoch; do
             if [ -n "$user" ] && [ "$epoch" -gt 0 ]; then
                 local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
                 CONNECTION_CACHE[$user]="$formatted|$epoch"
             fi
         done < <(grep -i "Accepted password for\|Accepted publickey for" /var/log/auth.log 2>/dev/null | \
-        awk '
+        awk -v current_epoch="$current_epoch" '
+        BEGIN {
+            one_year = 31536000  # seconds in a year
+        }
         {
             ts = $1 " " $2 " " $3
             # Use mawk-compatible approach
@@ -556,6 +634,10 @@ build_connection_cache() {
                         cmd = "date -d \"" ts "\" +%s 2>/dev/null"
                         cmd | getline epoch_ts
                         close(cmd)
+                        # Fix year rollover: if date is in the future, it is from last year
+                        if (epoch_ts > current_epoch) {
+                            epoch_ts = epoch_ts - one_year
+                        }
                         epoch_cache[ts] = epoch_ts
                     } else {
                         epoch_ts = epoch_cache[ts]
@@ -648,9 +730,15 @@ build_samba_connection_cache() {
             
             if [ -n "$timestamp" ]; then
                 # Convert to epoch - GNU date format
-                # Format should be: "2025-10-12 01:24:03" or "Oct 12 01:24:03 2025"
+                # Note: Log timestamps don't include year, so we need to handle year rollover
                 local current_year=$(date +%Y)
+                local current_epoch=$(date +%s)
                 local epoch=$(date -d "$timestamp $current_year" +%s 2>/dev/null || echo 0)
+                
+                # If parsed date is in the future, it's from last year
+                if [ "$epoch" -gt "$current_epoch" ]; then
+                    epoch=$((epoch - 31536000))  # Subtract one year (365 days in seconds)
+                fi
                 
                 if [ "$epoch" -gt 0 ]; then
                     local formatted=$(date -d "@$epoch" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "Unknown")
@@ -1982,20 +2070,22 @@ info_user() {
         echo "Snapshots: $snapshot_count"
         
         if [ "$snapshot_count" -gt 0 ]; then
-            # Sort by modification time (creation time of snapshot), not alphabetically
-            # This handles snapshots with non-standard names like test_manual_*
-            local oldest=$(find "$versions_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | head -1 | cut -d' ' -f2-)
-            local newest=$(find "$versions_dir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            # Use shared get_snapshot_info function for consistent birth time handling
+            local oldest_info=$(get_snapshot_info "$versions_dir" "oldest")
+            local oldest=$(echo "$oldest_info" | cut -d'|' -f1)
+            local oldest_date=$(echo "$oldest_info" | cut -d'|' -f3)
             
-            if [ -n "$oldest" ]; then
+            local newest_info=$(get_snapshot_info "$versions_dir" "newest")
+            local newest=$(echo "$newest_info" | cut -d'|' -f1)
+            local newest_date=$(echo "$newest_info" | cut -d'|' -f3)
+            
+            if [ -n "$oldest" ] && [ "$oldest_date" != "Never" ]; then
                 echo "  Oldest:  $(basename "$oldest")"
-                local oldest_date=$(stat -c %y "$oldest" 2>/dev/null | cut -d. -f1 || stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$oldest" 2>/dev/null)
                 echo "           Created: $oldest_date"
             fi
             
-            if [ -n "$newest" ]; then
+            if [ -n "$newest" ] && [ "$newest_date" != "Never" ]; then
                 echo "  Newest:  $(basename "$newest")"
-                local newest_date=$(stat -c %y "$newest" 2>/dev/null | cut -d. -f1 || stat -f "%Sm" -t "%Y-%m-%d %H:%M:%S" "$newest" 2>/dev/null)
                 echo "           Created: $newest_date"
             fi
         fi
@@ -2026,11 +2116,14 @@ info_user() {
         source /etc/terminas-retention.conf
         local has_custom=false
         
-        local user_daily_var="${username}_KEEP_DAILY"
-        local user_weekly_var="${username}_KEEP_WEEKLY"
-        local user_monthly_var="${username}_KEEP_MONTHLY"
-        local user_retention_var="${username}_RETENTION_DAYS"
-        local user_advanced_var="${username}_ENABLE_ADVANCED_RETENTION"
+        # Replace dashes with underscores for valid bash variable names
+        local safe_username="${username//-/_}"
+        
+        local user_daily_var="${safe_username}_KEEP_DAILY"
+        local user_weekly_var="${safe_username}_KEEP_WEEKLY"
+        local user_monthly_var="${safe_username}_KEEP_MONTHLY"
+        local user_retention_var="${safe_username}_RETENTION_DAYS"
+        local user_advanced_var="${safe_username}_ENABLE_ADVANCED_RETENTION"
         
         if [ -n "${!user_daily_var}" ] || [ -n "${!user_weekly_var}" ] || [ -n "${!user_monthly_var}" ] || \
            [ -n "${!user_retention_var}" ] || [ -n "${!user_advanced_var}" ]; then

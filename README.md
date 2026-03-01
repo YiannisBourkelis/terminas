@@ -168,36 +168,35 @@ The recommended installation location depends on your use case:
 
 termiNAS includes cross-platform client scripts for easy file uploads:
 
-#### Linux Client (`src/client/linux/upload.sh`)
+#### Linux Client (`src/client/linux/setup-client.sh`)
 The recommended installation location depends on your use case:
 
 **Recommendation:** Use `/opt/terminas` for all production client installations.
 
-Bash script with lftp/sftp support and named parameters:
+Interactive setup script that configures automated rclone-based backups:
 ```bash
-# Upload a file
-./upload.sh -l /data/file.txt -u backupuser -p "pass" -s backup.example.com
-
-# Upload a directory
-./upload.sh -l /data/folder -u backupuser -p "pass" -s backup.example.com -d /backups
-
-# Force upload and enable debug mode
-./upload.sh -l /data/file.txt -u backupuser -p "pass" -s backup.example.com --force --debug
+# Run the interactive setup (requires root)
+sudo ./setup-client.sh
 ```
 
-**Parameters:**
-- `-l, --local-path` (required): File or directory to upload
-- `-u, --user` (required): SFTP username
-- `-p, --password` (required): SFTP password
-- `-s, --server` (required): Server hostname or IP
-- `-d, --dest-path` (optional): Remote path (default: `/uploads`)
-- `-f, --force` (optional): Skip hash check, always upload
-- `--port` (optional): SFTP port (default: 22)
-- `--debug` (optional): Enable debug output
+The setup will prompt for:
+- Local path to backup
+- Backup server hostname/IP
+- Username and password
+- Remote destination path (default: /uploads)
+- Backup schedule time
+- Backup job name
+
+**What it creates:**
+- An rclone remote configuration stored securely in `/root/.config/rclone/rclone.conf`
+- A backup script in `/usr/local/bin/terminas-backup/backup-<jobname>.sh`
+- A cron job for daily automated backups
+- Logrotate configuration for log management
 
 **Features:**
-- SHA-256 hash checking to skip unchanged files
-- Automatic lftp/sftp detection
+- Uses `rclone sync` for efficient directory mirroring (like rsync)
+- Credentials stored securely in rclone config (not visible in process list)
+- Automatic host key handling
 - Mirror mode for directory uploads (uploads contents)
 - Host key auto-acceptance option
 
@@ -302,148 +301,18 @@ Cron job:
 
 **Multiple backup jobs:** Run the script multiple times to configure different backup jobs (e.g., web1, database, documents). Each gets its own script, credentials, logs, and schedule.
 
-#### Windows Client (`src/client/windows/upload.ps1`)
-PowerShell script with hash-based skipping and WinSCP support:
-```powershell
-# Upload a file
-.\upload.ps1 -LocalPath "C:\data\file.txt" -User backupuser -Password "pass" -Server backup.example.com
+#### Windows Client (rclone + SFTP)
 
-# Upload a directory
-.\upload.ps1 -LocalPath "C:\data\folder" -User backupuser -Password "pass" -Server backup.example.com -DestinationPath "/data"
+Windows backups use **rclone** to sync a local folder to the server over SFTP.
 
-# Force upload (skip hash check)
-.\upload.ps1 -LocalPath "C:\data\file.txt" -User backupuser -Password "pass" -Server backup.example.com -Force
+- Setup guide: `src/client/windows/RCLONE_BACKUP_SETUP.md`
 
-# Sync directory and delete remote files not present locally (USE WITH CAUTION)
-.\upload.ps1 -LocalPath "C:\data\folder" -User backupuser -Password "pass" -Server backup.example.com -DeleteRemote
-```
+At a high level:
 
-**Parameters:**
-- `-LocalPath` (required): File or directory to upload
-- `-User` (required): SFTP username
-- `-Password` (required): SFTP password
-- `-Server` (required): Server hostname or IP
-- `-DestinationPath` (optional): Remote path (defaults to `/uploads`)
-- `-Port` (optional): SFTP port (default: 22)
-- `-Force` (optional): Skip hash check, always upload
-- `-DeleteRemote` (optional): For directory synchronization, delete remote files that don't exist locally (**WARNING: USE WITH CAUTION**)
-
-**Features:**
-- SHA-256 hash checking to skip unchanged files
-- Automatic WinSCP detection
-- Process monitoring to prevent hanging
-- Support for both files and directories
-- Mirror mode: Deleted local files are also deleted from remote backup
-
-#### Automated Windows Backup Setup (`src/client/windows/setup-client.ps1`)
-
-Interactive setup script that configures automated daily backups for Windows clients (Windows Server 2008 R2 and later):
-
-```powershell
-# Run PowerShell as Administrator, then:
-cd path\to\termiNAS\src\client\windows
-.\setup-client.ps1
-```
-
-**What it does:**
-- Interactively prompts for backup configuration (path, server, credentials, schedule)
-- Locates or prompts for path to `upload.ps1` script
-- Creates secure credentials file in `C:\ProgramData\terminas-credentials\` (restricted to Administrators)
-- Generates backup script in `C:\Program Files\terminas-backup\`
-- Creates Windows Scheduled Task for daily automated backups
-- Validates all settings and offers immediate test run
-
-**Example Session:**
-```
-==========================================
-termiNAS Windows Client Setup
-==========================================
-This script will help you configure automated daily backups.
-
-Please provide the following information:
-
-Enter the local path to backup (e.g., C:\Data): C:\Data
-Enter the backup server hostname or IP: backup.example.com
-Enter the SFTP username: webserver1
-Enter the SFTP password: ********
-Confirm SFTP password: ********
-Enter the destination path on server (default: /uploads): /uploads
-Enter the backup time (HH:MM format, e.g., 02:00): 03:00
-Enter a name for this backup job (alphanumeric, no spaces): web-backup
-Found upload.ps1 at: C:\termiNAS\src\client\windows\upload.ps1
-Use this location? (y/n): y
-[OK] Using upload script: C:\termiNAS\src\client\windows\upload.ps1
-
-==========================================
-Configuration Summary
-==========================================
-Local path:      C:\Data
-Backup server:   backup.example.com
-Username:        webserver1
-Remote path:     /uploads
-Backup time:     03:00 daily
-Job name:        web-backup
-
-Is this correct? (y/n): y
-
-==========================================
-Installing Backup Configuration
-==========================================
-[OK] Created directory: C:\Program Files\terminas-backup
-[OK] Created directory: C:\ProgramData\terminas-credentials
-[OK] Created directory: C:\ProgramData\terminas-logs
-[OK] Created secure credentials file: C:\ProgramData\terminas-credentials\web-backup.xml
-[OK] Created backup script: C:\Program Files\terminas-backup\backup-web-backup.ps1
-[OK] Created scheduled task: termiNAS-Backup-web-backup
-[OK] WinSCP found
-
-==========================================
-Setup Complete!
-==========================================
-
-Backup job 'web-backup' has been configured successfully!
-
-Configuration details:
-  - Backup script:    C:\Program Files\terminas-backup\backup-web-backup.ps1
-  - Credentials:      C:\ProgramData\terminas-credentials\web-backup.xml
-  - Log file:         C:\ProgramData\terminas-logs\terminas-web-backup.log
-  - Schedule:         Daily at 03:00
-
-Useful commands:
-  - Test backup now:      PowerShell.exe -ExecutionPolicy Bypass -File "C:\Program Files\terminas-backup\backup-web-backup.ps1"
-  - View logs:            Get-Content "C:\ProgramData\terminas-logs\terminas-web-backup.log" -Tail 50
-  - View scheduled task:  Get-ScheduledTask -TaskName 'termiNAS-Backup-web-backup'
-  - Run task manually:    Start-ScheduledTask -TaskName 'termiNAS-Backup-web-backup'
-  - Disable task:         Disable-ScheduledTask -TaskName 'termiNAS-Backup-web-backup'
-
-Would you like to test the backup now? (y/n):
-```
-
-**What gets created:**
-```
-C:\Program Files\terminas-backup\
-  └── backup-web-backup.ps1            # Backup script
-
-C:\ProgramData\terminas-credentials\
-  └── web-backup.xml                   # Secure credentials (Administrators only)
-
-C:\ProgramData\terminas-logs\
-  └── terminas-web-backup.log             # Backup logs
-
-Windows Scheduled Task:
-  Name: termiNAS-Backup-web-backup
-  Runs as: NT AUTHORITY\SYSTEM
-  Schedule: Daily at 03:00
-```
-
-**Requirements:**
-- Windows Server 2008 R2 or later (PowerShell 2.0+)
-- Administrator privileges
-- `upload.ps1` script (in same directory or specify custom path)
-- WinSCP in PATH or specify path with `-WinSCPPath` parameter
-  - Download WinSCP: https://winscp.net/
-
-**Multiple backup jobs:** Run the script multiple times to configure different backup jobs. Each gets its own scheduled task, credentials, logs, and schedule.
+1. Download rclone from https://github.com/rclone/rclone and place `rclone.exe` in a user-protected folder.
+2. Run `rclone.exe config` and create an `sftp` remote pointing to your termiNAS server (host/user/password).
+3. Test a one-way mirror (local → server) with `rclone sync`.
+4. Create a Windows Scheduled Task to run daily.
 
 ### Server Administration
 
@@ -789,6 +658,8 @@ testuser_ENABLE_ADVANCED_RETENTION=false
 testuser_RETENTION_DAYS=7
 ```
 
+> **Note:** For usernames containing dashes (e.g., `backup-server`), replace dashes with underscores in the variable name (e.g., `backup_server_KEEP_DAILY=14`).
+
 The cleanup script runs daily at 3:00 AM (configurable via `CLEANUP_HOUR` in the config file).
 
 **Manual cleanup:**
@@ -838,6 +709,8 @@ produser_QUOTA_GB=500
 # Quota warning threshold (%)
 QUOTA_WARN_THRESHOLD=90
 ```
+
+> **Note:** For usernames containing dashes (e.g., `backup-server`), replace dashes with underscores in the variable name (e.g., `backup_server_QUOTA_GB=100`).
 
 **How quota enforcement works:**
 
@@ -1302,7 +1175,7 @@ Both client scripts support configuration via command-line parameters. For autom
 
 #### Automated Setup (Recommended)
 
-**Windows:** Use `src/client/windows/setup-client.ps1` (see [Automated Windows Backup Setup](#automated-windows-backup-setup-srcclientwindowssetup-clientps1) above)
+**Windows:** Use rclone (see `src/client/windows/RCLONE_BACKUP_SETUP.md`)
 
 **Linux:** Use `src/client/linux/setup-client.sh` (see [Automated Linux Backup Setup](#automated-linux-backup-setup-srcclientlinuxsetup-clientsh) above)
 
@@ -1310,99 +1183,35 @@ Both client scripts support configuration via command-line parameters. For autom
 
 If you prefer to manually configure scheduled backups:
 
-**Windows - Task Scheduler (PowerShell):**
-
-Basic (WinSCP in PATH):
-```powershell
-# Method 1: Using PowerShell cmdlets (Windows Server 2012+, recommended)
-$action = New-ScheduledTaskAction -Execute "PowerShell.exe" `
-    -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\termiNAS\src\client\windows\upload.ps1 -LocalPath C:\Data -Username backupuser -Password 'SecurePass123!' -Server backup.example.com -DestPath uploads"
-
-$trigger = New-ScheduledTaskTrigger -Daily -At 2:00AM
-
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -RunOnlyIfNetworkAvailable
-
-Register-ScheduledTask -TaskName "termiNAS-Daily-Backup" `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -User "NT AUTHORITY\SYSTEM" `
-    -RunLevel Highest `
-    -Description "Daily backup to termiNAS server"
-```
-
-With custom WinSCP path and host key verification:
-```powershell
-$action = New-ScheduledTaskAction -Execute "PowerShell.exe" `
-    -Argument "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File C:\termiNAS\src\client\windows\upload.ps1 -LocalPath C:\Data -Username backupuser -Password 'SecurePass123!' -Server backup.example.com -DestPath uploads -WinSCPPath 'C:\Program Files\WinSCP\WinSCP.com' -ExpectedHostFingerprint 'ssh-ed25519 255 AAAA...'"
-
-$trigger = New-ScheduledTaskTrigger -Daily -At 2:00AM
-
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -RunOnlyIfNetworkAvailable
-
-Register-ScheduledTask -TaskName "termiNAS-Daily-Backup" `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -User "NT AUTHORITY\SYSTEM" `
-    -RunLevel Highest `
-    -Description "Daily backup to termiNAS server"
-```
-
-**Windows - Task Scheduler (GUI method for older systems):**
+**Windows - Task Scheduler (GUI):**
 1. Open **Task Scheduler** (`taskschd.msc`)
-2. Click **Create Basic Task** in the right panel
-3. Name: "termiNAS Daily Backup", click **Next**
-4. Trigger: Select **Daily**, click **Next**
-5. Start time: Set your desired backup time (e.g., 2:00 AM), click **Next**
-6. Action: Select **Start a program**, click **Next**
-7. Program/script: `PowerShell.exe`
-8. Add arguments (basic - WinSCP in PATH):
+2. Create a task and select **Run whether user is logged on or not**
+3. Action: **Start a program**
+4. Program/script: full path to `rclone.exe`
+5. Arguments (example):
    ```
-   -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File "C:\termiNAS\src\client\windows\upload.ps1" -LocalPath "C:\Data" -Username "backupuser" -Password "SecurePass123!" -Server "backup.example.com" -DestPath "uploads"
+   sync "C:\Users\USER_NAME\Downloads\test-user1" testuser1:uploads --log-file "C:\Users\USER_NAME\Downloads\rclone-testuser1.log" --log-level INFO --log-file-max-size 10M --log-file-max-backups 10 --log-file-max-age 30d
    ```
-   **Or with custom WinSCP path and host key verification:**
-   ```
-   -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File "C:\termiNAS\src\client\windows\upload.ps1" -LocalPath "C:\Data" -Username "backupuser" -Password "SecurePass123!" -Server "backup.example.com" -DestPath "uploads" -WinSCPPath "C:\Program Files\WinSCP\WinSCP.com" -ExpectedHostFingerprint "ssh-ed25519 255 AAAA..."
-   ```
-9. Click **Next**, then **Finish**
-10. Right-click the task, select **Properties**
-11. Under **General** tab:
-    - Select "Run whether user is logged on or not"
-    - Check "Run with highest privileges"
-    - Change user to "SYSTEM" (click Change User, type "SYSTEM")
-12. Under **Settings** tab:
-    - Check "Run task as soon as possible after a scheduled start is missed"
-    - Check "Start the task only if the computer is on AC power" (optional)
-13. Click **OK**
 
-**Windows - Legacy schtasks.exe (Windows Server 2008 R2):**
-
-Basic (WinSCP in PATH):
-```cmd
-schtasks /Create /SC DAILY /TN "termiNAS-Daily-Backup" /TR "PowerShell.exe -ExecutionPolicy Bypass -File C:\termiNAS\src\client\windows\upload.ps1 -LocalPath C:\Data -Username backupuser -Password SecurePass123! -Server backup.example.com -DestPath uploads" /ST 02:00 /RU SYSTEM /RL HIGHEST
-```
-
-With custom WinSCP path and host key verification:
-```cmd
-schtasks /Create /SC DAILY /TN "termiNAS-Daily-Backup" /TR "PowerShell.exe -ExecutionPolicy Bypass -File C:\termiNAS\src\client\windows\upload.ps1 -LocalPath C:\Data -Username backupuser -Password SecurePass123! -Server backup.example.com -DestPath uploads -WinSCPPath 'C:\Program Files\WinSCP\WinSCP.com' -ExpectedHostFingerprint 'ssh-ed25519 255 AAAA...'" /ST 02:00 /RU SYSTEM /RL HIGHEST
-```
+**Note:** On Windows versions prior to Windows 10, use rclone v1.63.1 and remove the `--log-file-max-*` flags.
 
 **Linux - Cron Job:**
+
+The recommended approach is to use `setup-client.sh` which automatically creates a cron job:
 ```bash
-# Edit root's crontab
+sudo ./src/client/linux/setup-client.sh
+```
+
+Alternatively, for manual rclone setup:
+```bash
+# Create rclone remote
+rclone config create terminas sftp host backup.example.com user backupuser pass $(rclone obscure "SecurePass123!")
+
+# Add cron job
 sudo crontab -e
 
 # Add this line to run backup daily at 2:00 AM
-0 2 * * * /opt/terminas/src/client/linux/upload.sh -l /var/data -u backupuser -p "SecurePass123!" -s backup.example.com -d /uploads >> /var/log/terminas-backup.log 2>&1
+0 2 * * * rclone sync /var/data terminas:uploads --log-file /var/log/terminas-backup.log --log-level INFO
 
 # Optional: Add log rotation
 # Create /etc/logrotate.d/terminas-backup with:
@@ -1455,7 +1264,7 @@ To modify or extend the scripts:
 - Edit `src/server/setup.sh` for server configuration changes
 - Edit `src/server/create_user.sh` for user setup tweaks
 - Edit `src/server/manage_users.sh` to add new management commands
-- Edit client scripts (`src/client/windows/upload.ps1` or `src/client/linux/upload.sh`) for upload behavior
+- Edit client script (`src/client/linux/setup-client.sh`) for backup setup behavior
 - Test in a VM to avoid disrupting production
 
 **Key Files:**
@@ -1463,8 +1272,7 @@ To modify or extend the scripts:
 - `src/server/create_user.sh` - User creation with password generation
 - `src/server/delete_user.sh` - User deletion
 - `src/server/manage_users.sh` - User and snapshot management
-- `src/client/windows/upload.ps1` - Windows PowerShell upload client
-- `src/client/linux/upload.sh` - Linux Bash upload client
+- `src/client/linux/setup-client.sh` - Linux client backup setup (creates rclone config)
 - `/var/terminas/scripts/terminas-monitor.sh` - Real-time snapshot monitor (created by setup)
 - `/var/terminas/scripts/terminas-cleanup.sh` - Retention policy cleanup (created by setup)
 - `/etc/terminas-retention.conf` - Retention configuration (created by setup)
@@ -1473,52 +1281,7 @@ To modify or extend the scripts:
 
 ### Windows Client Issues
 
-**Problem: Scheduled task fails with exit code 6 (fingerprint extraction failed)**
-
-Possible causes:
-1. First run failed to extract host fingerprint from WinSCP log
-2. WinSCP log format changed (report this as a bug)
-
-Solutions:
-```powershell
-# Option 1: Enable debug mode and check logs
-Get-Content "C:\ProgramData\terminas-logs\terminas-<jobname>.log" -Tail 100
-
-# Option 2: Manually provide the expected fingerprint
-# Get fingerprint from server:
-ssh-keyscan -t ed25519 backup.example.com
-
-# Add to credentials file or use -ExpectedHostFingerprint parameter to upload.ps1
-```
-
-**Problem: Scheduled task fails after server reinstall/key change**
-
-This is expected behavior! The cached fingerprint no longer matches.
-
-Solution:
-```powershell
-# Delete cached fingerprint to re-establish trust
-Remove-Item "C:\Windows\System32\config\systemprofile\AppData\Local\terminas\hostkeys\backup.example.com.txt"
-
-# Next scheduled run will accept new key and cache it
-```
-
-**Problem: WinSCP hangs after successful upload**
-
-This is a known WinSCP issue with the console version. The script includes hang detection.
-
-Mitigation:
-- Script monitors for "No session." message + 5-second silence
-- Automatically force-kills hung WinSCP processes
-- Upload completes successfully despite hang
-
-**Problem: Task Scheduler shows "Task has not yet run"**
-
-Verify:
-```powershell
-# Check task configuration
-Get-ScheduledTask -TaskName "termiNAS-Backup-<jobname>" | Format-List *
-
+Windows backups are implemented with rclone. See `src/client/windows/RCLONE_BACKUP_SETUP.md` for setup, logging, and Task Scheduler guidance.
 # Check task trigger
 Get-ScheduledTask -TaskName "termiNAS-Backup-<jobname>" | Select-Object -ExpandProperty Triggers
 
@@ -1549,8 +1312,7 @@ Solution:
 # Accept host key manually first
 ssh-keyscan -H backup.example.com >> ~/.ssh/known_hosts
 
-# Or use --accept-hostkey option in upload script
-./upload.sh -l /data -u user -p pass -s server --accept-hostkey
+# The setup-client.sh script handles this automatically
 ```
 
 ### Server Issues
