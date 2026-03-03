@@ -79,34 +79,46 @@ nano CHANGELOG.md  # or your preferred editor
 - Bug fix description
 ```
 
-### 2. Commit Version Bump
+### 2. Create Release Notes File (Optional)
+
+Create a detailed release notes file for this version:
+
+```bash
+# Create release notes file (see previous releases for format)
+nano RELEASE_NOTES_v1.0.0-alpha.2.md
+```
+
+Include: release date, what's new, installation instructions, known issues, and testing checklist.
+
+### 3. Commit Version Bump
 
 ```bash
 # Stage the version changes
-git add VERSION CHANGELOG.md
+git add VERSION CHANGELOG.md RELEASE_NOTES_v1.0.0-alpha.2.md
 
 # Commit with clear message
 git commit -m "Bump version to 1.0.0-alpha.2
 
 - Updated VERSION file
-- Updated CHANGELOG.md with release notes"
+- Updated CHANGELOG.md with release notes
+- Added RELEASE_NOTES_v1.0.0-alpha.2.md"
 ```
 
-### 3. Merge to `main` Branch
+### 4. Merge to `main` Branch
 
 ```bash
 # Switch to main branch
 git checkout main
 
-# Merge dev branch (creates merge commit)
-git merge dev
+# Merge dev branch (use --no-edit to accept default merge message)
+git merge dev --no-edit
 
 # Verify everything looks correct
 git log --oneline -5
 git diff HEAD~1
 ```
 
-### 4. Create Git Tag
+### 5. Create Git Tag
 
 ```bash
 # Create annotated tag with message
@@ -119,26 +131,29 @@ See CHANGELOG.md for full details."
 git tag -l -n9 v1.0.0-alpha.2
 ```
 
-### 5. Push to GitHub
+### 6. Push to GitHub
 
 ```bash
 # Push main branch and tags
 git push origin main --tags
 ```
 
-### 6. Return to `dev` Branch
+### 7. Return to `dev` Branch and Push
 
 ```bash
 # Switch back to dev for continued development
 git checkout dev
+
+# Push dev branch (contains version bump commit)
+git push origin dev
 ```
 
-### 7. Create GitHub Release
+### 8. Create GitHub Release
 
 1. Go to: https://github.com/YiannisBourkelis/terminas/releases/new
 2. **Select tag**: `v1.0.0-alpha.2`
 3. **Release title**: `termiNAS v1.0.0-alpha.2 - [Brief Description]`
-4. **Description**: Copy content from `CHANGELOG.md` for this version, add installation instructions
+4. **Description**: Copy content from `RELEASE_NOTES_v1.0.0-alpha.2.md` (or `CHANGELOG.md` if no release notes file)
 5. **Pre-release**: Check if alpha/beta, uncheck if stable
 6. **Click**: "Publish release"
 
@@ -167,12 +182,13 @@ echo "$VERSION" > VERSION
 
 echo "VERSION file updated to $VERSION"
 echo ""
-echo "Now edit CHANGELOG.md to add release notes for v$VERSION"
+echo "Now edit CHANGELOG.md and optionally create RELEASE_NOTES_v$VERSION.md"
 echo "Press Enter when done..."
 read
 
 # Commit version bump
 git add VERSION CHANGELOG.md
+[ -f "RELEASE_NOTES_v$VERSION.md" ] && git add "RELEASE_NOTES_v$VERSION.md"
 git commit -m "Bump version to $VERSION
 
 - Updated VERSION file
@@ -180,7 +196,7 @@ git commit -m "Bump version to $VERSION
 
 # Merge to main
 git checkout main || exit 1
-git merge dev || exit 1
+git merge dev --no-edit || exit 1
 
 # Create tag
 git tag -a "v$VERSION" -m "Release v$VERSION
@@ -190,8 +206,9 @@ See CHANGELOG.md for details."
 # Push
 git push origin main --tags
 
-# Return to dev
+# Return to dev and push
 git checkout dev
+git push origin dev
 
 echo ""
 echo "✅ Release v$VERSION complete!"
@@ -199,7 +216,7 @@ echo ""
 echo "Next steps:"
 echo "1. Go to: https://github.com/YiannisBourkelis/terminas/releases/new"
 echo "2. Select tag: v$VERSION"
-echo "3. Create GitHub Release with CHANGELOG.md content"
+echo "3. Create GitHub Release with RELEASE_NOTES or CHANGELOG.md content"
 ```
 
 Save this as `release.sh` in the project root, make it executable:
