@@ -863,6 +863,7 @@ sudo systemctl status fail2ban
 ```bash
 sudo fail2ban-client status sshd
 sudo fail2ban-client status sshd-ddos
+sudo fail2ban-client status terminas-samba   # when Samba is enabled
 ```
 
 **View ban statistics and history:**
@@ -884,6 +885,7 @@ sudo grep "$(date +%Y-%m-%d)" /var/log/fail2ban.log | grep "Ban" | wc -l
 ```bash
 sudo fail2ban-client set sshd unbanip <IP_ADDRESS>
 sudo fail2ban-client set sshd-ddos unbanip <IP_ADDRESS>
+sudo fail2ban-client set terminas-samba unbanip <IP_ADDRESS>
 ```
 
 **View recent failed SSH/SFTP authentication attempts:**
@@ -899,18 +901,20 @@ sudo grep "Connection closed by authenticating user" /var/log/auth.log | tail -2
 
 **View recent failed Samba authentication attempts:**
 ```bash
-# Samba authentication failures are logged to separate log files
-# Find which log files contain authentication failures
-sudo find /var/log/samba/ -name "log.*" -exec grep -l "check_ntlm_password.*FAILED\|NT_STATUS_WRONG_PASSWORD\|NT_STATUS_LOGON_FAILURE" {} \;
+# Samba logs authentication failures for all clients to one file
+# (log level "1 auth_audit:2"), which the terminas-samba jail watches
+sudo grep "status \[NT_STATUS" /var/log/samba/log.smbd | tail -10
 
-# View recent failures from all Samba log files
-sudo find /var/log/samba/ -name "log.*" -exec grep "check_ntlm_password.*FAILED with error NT_STATUS\|status \[NT_STATUS" {} \; | tail -10
+# Monitor for new authentication failures (real-time, survives log rotation)
+sudo tail -F /var/log/samba/log.smbd | grep --line-buffered "status \[NT_STATUS"
 
-# Monitor all Samba logs for new authentication failures (real-time)
-sudo tail -f /var/log/samba/log.* 2>/dev/null | grep --line-buffered "check_ntlm_password.*FAILED with error NT_STATUS\|status \[NT_STATUS"
+# Check that the jail's filter matches the log
+sudo fail2ban-regex /var/log/samba/log.smbd /etc/fail2ban/filter.d/terminas-samba.conf
+```
 
-# More generic monitoring for any Samba failures or errors
-sudo tail -f /var/log/samba/log.* 2>/dev/null | grep --line-buffered "FAILED\|NT_STATUS"
+Servers set up before this change logged to one file per client (`/var/log/samba/log.<ip>`), which on an internet-facing server grows to tens of thousands of files from port scanners. fail2ban polled each of them every second (high CPU) and never watched files created after it started. Re-run `sudo ./setup.sh --samba` to switch to the single log, then remove the old files:
+```bash
+sudo find /var/log/samba -maxdepth 1 -regextype posix-extended -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}' -delete
 ```
 
 **Security configuration details:**
