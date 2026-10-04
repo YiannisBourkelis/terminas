@@ -620,6 +620,10 @@ F2B
     echo "Starting Samba services..."
     systemctl enable smbd nmbd
     systemctl restart smbd nmbd
+    # winbind (installed with Samba on Debian 13) also reads smb.conf and
+    # starts samba-dcerpcd helpers with its own debug level, so restart it if it
+    # runs; otherwise those helpers keep logging with the previous settings.
+    systemctl try-restart winbind 2>/dev/null || true
     echo "  - Samba is now running with strict security:"
     echo "    * SMB3 protocol only (no older insecure versions)"
     echo "    * Encryption required for all connections"
