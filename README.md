@@ -150,6 +150,7 @@ The recommended installation location depends on your use case:
    - SSH/SFTP authentication monitoring (5 failed attempts = 1 hour ban)
    - Samba authentication monitoring (5 failed attempts = 1 hour ban, when Samba is enabled)
    - DOS protection (10 connection attempts in 60s = 10 minute ban)
+   - Repeat offenders: each new ban of the same IP doubles the previous ban time, up to 2 weeks
    - IP blocking at firewall level (nftables)
 
 5. Create backup users (run as root for each user):
@@ -912,16 +913,19 @@ sudo tail -F /var/log/samba/log.smbd | grep --line-buffered "status \[NT_STATUS"
 sudo fail2ban-regex /var/log/samba/log.smbd /etc/fail2ban/filter.d/terminas-samba.conf
 ```
 
+Samba's RPC helper logs (`log.samba-dcerpcd`, `log.rpcd_*`) are rotated by `/etc/logrotate.d/terminas-samba` at 10 MB, keeping two compressed copies in `/var/log/samba/rotated/`; the helpers are too short-lived to run Samba's own `max log size` check.
+
 Servers set up before this change logged to one file per client (`/var/log/samba/log.<ip>`), which on an internet-facing server grows to tens of thousands of files from port scanners. fail2ban polled each of them every second (high CPU) and never watched files created after it started. Re-run `sudo ./setup.sh --samba` to switch to the single log, then remove the old files:
 ```bash
-sudo find /var/log/samba -maxdepth 1 -regextype posix-extended -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}' -delete
+sudo find /var/log/samba -maxdepth 1 -regextype posix-extended -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}(\.old)?' -delete
 ```
 
 **Security configuration details:**
 - **Authentication failures**: 5 failed attempts within 10 minutes = 1 hour IP ban
 - **DOS protection**: 10 connection attempts within 60 seconds = 10 minute IP ban
+- **Repeat offenders**: each new ban of the same IP doubles the previous ban time (1h, 2h, 4h, ...) up to 2 weeks; bans in any termiNAS jail count (`bantime.increment` in `/etc/fail2ban/jail.d/terminas-bantime.local` and the Samba jail). Ban history is kept 30 days (`dbpurgeage` in `/etc/fail2ban/fail2ban.d/terminas.local`).
 - **Scope**: Protects both SSH and SFTP (same authentication layer)
-- **Action**: Complete IP block at firewall level (iptables)
+- **Action**: Complete IP block at firewall level (nftables). The Samba jail blocks all ports for the banned IP, so a client that keeps failing Samba logins also loses SFTP until unbanned.
 
 ### For End Users (SFTP Access)
 

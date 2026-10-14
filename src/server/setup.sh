@@ -423,6 +423,41 @@ NFTCOMMON
     echo "  - Created nftables-common.local configuration"
 fi
 
+# Escalating ban times: each repeat ban of an IP doubles the previous one
+# (1h, 2h, 4h, ... for sshd) up to 2 weeks. Kept in termiNAS-owned files that are
+# rewritten on every run, so existing servers get it and other jails are untouched.
+# overalljails: earlier bans of the IP in any jail count toward the next ban.
+# The terminas-samba jail carries the same settings in its own jail file.
+cat > /etc/fail2ban/jail.d/terminas-bantime.local <<'F2B'
+# termiNAS escalating ban times - AUTOMATICALLY CONFIGURED by setup.sh
+# MANUAL CHANGES WILL BE OVERWRITTEN when setup.sh is re-run
+[sshd]
+bantime.increment = true
+bantime.factor = 1
+# 2 weeks
+bantime.maxtime = 1209600
+bantime.overalljails = true
+
+[sshd-ddos]
+bantime.increment = true
+bantime.factor = 1
+# 2 weeks
+bantime.maxtime = 1209600
+bantime.overalljails = true
+F2B
+echo "  - Created/updated escalating ban times (doubling per repeat ban, max 2 weeks)"
+
+# Ban escalation looks up earlier bans in the fail2ban database, which by default
+# forgets them after 1 day. Keep the history longer than the 2-week maximum.
+mkdir -p /etc/fail2ban/fail2ban.d
+cat > /etc/fail2ban/fail2ban.d/terminas.local <<'F2B'
+# termiNAS fail2ban server settings - AUTOMATICALLY CONFIGURED by setup.sh
+# MANUAL CHANGES WILL BE OVERWRITTEN when setup.sh is re-run
+[DEFAULT]
+# Keep ban history long enough for bantime.increment (max ban 2 weeks)
+dbpurgeage = 30d
+F2B
+
 # Enable and start fail2ban
 echo "Starting fail2ban service..."
 systemctl enable fail2ban
@@ -430,6 +465,7 @@ systemctl restart fail2ban
 echo "  - fail2ban is now protecting SSH/SFTP:"
 echo "    * 5 failed login attempts = 1 hour ban"
 echo "    * 10 connection attempts in 60s = 10 minute ban (DOS protection)"
+echo "    * Repeat offenders: ban time doubles with each new ban, up to 2 weeks"
 echo "    * Applies to both SSH and SFTP connections"
 
 # Configure Samba if enabled
@@ -482,7 +518,8 @@ if [ "$ENABLE_SAMBA" = "true" ]; then
    # Logging
    # One log file for all clients. Per-client files (log.%m) meant one file per
    # scanning IP (25k+ on an internet-facing server) that fail2ban had to poll.
-   syslog only = yes
+   # No "syslog only": it is deprecated, daemons log to their file regardless,
+   # and its warning was written to the RPC helper logs on every connection.
    log file = /var/log/samba/log.smbd
    max log size = 10000
    # auth_audit:2 logs authentication failures ("Auth: ... status [NT_STATUS_...]",
@@ -598,15 +635,40 @@ maxretry = 5
 bantime = 3600
 findtime = 600
 banaction = nftables-terminas
+# Escalating bans: doubles with each repeat ban of the IP, up to 2 weeks
+bantime.increment = true
+bantime.factor = 1
+bantime.maxtime = 1209600
+bantime.overalljails = true
 F2B
     echo "  - Created/updated fail2ban Samba jail configuration"
     if [ -n "$(find /var/log/samba -maxdepth 1 -regextype posix-extended \
-            -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}' -print -quit 2>/dev/null)" ]; then
+            -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}(\.old)?' -print -quit 2>/dev/null)" ]; then
         echo "  ⚠ Old per-client Samba logs (/var/log/samba/log.<ip>) are no longer used."
         echo "    Remove them with:"
-        echo "    find /var/log/samba -maxdepth 1 -regextype posix-extended -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}' -delete"
+        echo "    find /var/log/samba -maxdepth 1 -regextype posix-extended -regex '.*/log\.[0-9]{1,3}(\.[0-9]{1,3}){3}(\.old)?' -delete"
     fi
     
+    # Rotate the Samba RPC helper logs (samba-dcerpcd, rpcd_*). Each helper is a
+    # short-lived process that writes a few lines per connection and exits, so
+    # Samba's own "max log size" check never runs for them and the files grow
+    # without limit. Rotated copies go to a subdirectory so the rpcd_* pattern
+    # never matches its own rotations. log.smbd is not listed: smbd rotates it.
+    cat > /etc/logrotate.d/terminas-samba <<'LR'
+# termiNAS: Samba RPC helper logs - AUTOMATICALLY CONFIGURED by setup.sh
+/var/log/samba/log.samba-dcerpcd /var/log/samba/log.rpcd_* {
+    size 10M
+    rotate 2
+    olddir /var/log/samba/rotated
+    createolddir 0750 root root
+    compress
+    copytruncate
+    missingok
+    notifempty
+}
+LR
+    echo "  - Created/updated logrotate config for Samba RPC helper logs"
+
     # Always restart fail2ban when Samba is enabled to pick up filter updates
     echo "Reloading fail2ban with Samba protection..."
     systemctl restart fail2ban
@@ -627,7 +689,7 @@ F2B
     echo "  - Samba is now running with strict security:"
     echo "    * SMB3 protocol only (no older insecure versions)"
     echo "    * Encryption required for all connections"
-    echo "    * fail2ban protection (5 failed attempts = 1 hour ban)"
+    echo "    * fail2ban protection (5 failed attempts = 1 hour ban, doubling for repeat offenders up to 2 weeks)"
     echo "    * VFS audit logging for connection tracking and security"
     echo "    * User-specific shares with restricted permissions"
     echo "    * VFS audit logging enabled for connection tracking"
