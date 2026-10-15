@@ -17,6 +17,11 @@ else
 fi
 
 set -e
+# Files and directories this script creates are loaded or run by root
+# (logrotate, cron, fail2ban, smbd, systemd). Never inherit a permissive umask
+# such as 0002: logrotate refuses group-writable configs, and group write on a
+# root-run file is a privilege-escalation path.
+umask 022
 
 # Source common functions
 COMMON_LIB="$SCRIPT_DIR/common.sh"

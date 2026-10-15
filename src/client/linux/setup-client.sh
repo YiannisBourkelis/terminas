@@ -17,6 +17,11 @@ else
 fi
 
 set -e
+# Files and directories this script creates are loaded or run by root
+# (logrotate, cron, fail2ban, smbd, systemd). Never inherit a permissive umask
+# such as 0002: logrotate refuses group-writable configs, and group write on a
+# root-run file is a privilege-escalation path.
+umask 022
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -296,7 +301,7 @@ echo "" >> "\$LOG_FILE"
 
 exit \$EXIT_CODE
 EOF
-chmod +x "$BACKUP_SCRIPT"
+chmod 755 "$BACKUP_SCRIPT"
 print_success "Created backup script: $BACKUP_SCRIPT"
 
 # Create logrotate configuration
@@ -311,6 +316,8 @@ cat > "$LOGROTATE_FILE" <<EOF
     create 640 root adm
 }
 EOF
+# logrotate ignores configs that are writable by group or others
+chmod 644 "$LOGROTATE_FILE"
 print_success "Created log rotation config: $LOGROTATE_FILE"
 
 # Add cron job

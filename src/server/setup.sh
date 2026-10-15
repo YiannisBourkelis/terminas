@@ -26,6 +26,11 @@ else
 fi
 
 set -e
+# Files and directories this script creates are loaded or run by root
+# (logrotate, cron, fail2ban, smbd, systemd). Never inherit a permissive umask
+# such as 0002: logrotate refuses group-writable configs, and group write on a
+# root-run file is a privilege-escalation path.
+umask 022
 
 # Parse command line arguments
 ENABLE_SAMBA=false
@@ -759,6 +764,7 @@ cat > /var/terminas/scripts/terminas-monitor.sh <<'EOF'
 #   TERMINAS_SNAPSHOT_INTERVAL  max seconds of activity per snapshot (default 1800)
 #   TERMINAS_DEBUG=1            log every generation change
 
+umask 022
 LOG=/var/log/terminas.log
 RUNDIR=/var/run/terminas
 COMMON=/var/terminas/scripts/common.sh
@@ -1238,6 +1244,7 @@ else
     ENABLE_ADVANCED_RETENTION=false
 fi
 
+umask 022
 LOG=/var/log/terminas.log
 
 # Shared helpers (installed by setup.sh)
@@ -1549,6 +1556,32 @@ if ! crontab -l 2>/dev/null | grep -q "manage_users.sh refresh-sizes"; then
 else
     echo "Size-cache refresh cron job already exists"
 fi
+
+# Remove group/other write from files termiNAS installs that root loads or runs.
+# "cat > file" keeps an existing file's mode, so files created by an earlier run
+# under a permissive umask stay group-writable until repaired here (logrotate
+# skipped /etc/logrotate.d/terminas on such a host). Only termiNAS-owned paths.
+fix_terminas_permissions() {
+    local p
+    for p in \
+        /etc/logrotate.d/terminas /etc/logrotate.d/terminas-samba \
+        /etc/systemd/system/terminas-monitor.service \
+        /etc/fail2ban/jail.d/terminas-* /etc/fail2ban/fail2ban.d/terminas.local \
+        /etc/fail2ban/filter.d/sshd-ddos.conf /etc/fail2ban/filter.d/terminas-* \
+        /etc/fail2ban/action.d/nftables-terminas.conf /etc/fail2ban/action.d/nftables-common.local \
+        /etc/samba/smb.conf /etc/samba/smb.conf.d /etc/samba/smb.conf.d/*.conf \
+        /etc/sysctl.d/99-terminas-inotify.conf /etc/terminas-retention.conf; do
+        if [ -e "$p" ]; then
+            chmod go-w "$p"
+        fi
+    done
+    if [ -d /var/terminas ]; then
+        chmod -R go-w /var/terminas
+    fi
+    return 0
+}
+echo "Checking permissions of installed files..."
+fix_terminas_permissions
 
 echo ""
 echo "=========================================="
