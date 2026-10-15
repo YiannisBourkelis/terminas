@@ -91,7 +91,7 @@ Both platforms use **rclone over SFTP** syncing to the user's `uploads/` (mirror
 ## Conventions
 
 - Bash 4.x compatible (no Bash 5-only features). Quote all expansions, use `[[ ]]`, validate inputs, functions for modularity.
-- Root scripts set `umask 022` right after `set -e`, and anything root loads or runs (configs in `/etc`, units, scripts in `/var/terminas`) must not be group/other-writable: logrotate skips such configs, and `cat > file` keeps an existing file's mode, so `setup.sh`'s `fix_terminas_permissions` repairs modes of termiNAS-owned paths (add new installed paths there).
+- Root scripts set `umask 022` right after `set -e`: anything root loads or runs (configs in `/etc`, units, scripts in `/var/terminas`) must not be group/other-writable, and logrotate skips such configs.
 - Every script starts with a header: copyright (c) 2025 Yianni Bourkelis, MIT License reference, purpose, usage.
 - Colored terminal output: red = error, yellow = warning, green = success (see existing scripts / test template in `src/server/tests/README.md`).
 - New tests: `src/server/tests/test_<feature>.sh`, must support `--cleanup-only`, use `terminas_test_<feature>` as the test username, and be documented in the tests README.

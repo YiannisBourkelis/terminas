@@ -207,7 +207,7 @@ Per-user storage quotas use **Simple Quotas (squotas)** for reliable, high-perfo
 - Enable strict mode: `set -euo pipefail` (except where specific handling needed)
 - Use functions for modularity
 - Quote all variable expansions: `"$variable"`
-- Root scripts set `umask 022` right after `set -e`, and anything root loads or runs (configs in `/etc`, units, scripts in `/var/terminas`) must not be group/other-writable: logrotate skips such configs, and `cat > file` keeps an existing file's mode, so `setup.sh`'s `fix_terminas_permissions` repairs modes of termiNAS-owned paths (add new installed paths there).
+- Root scripts set `umask 022` right after `set -e`: anything root loads or runs (configs in `/etc`, units, scripts in `/var/terminas`) must not be group/other-writable, and logrotate skips such configs.
 - Use `[[` for conditionals instead of `[`
 - Validate inputs and check command exit codes
 - Add descriptive comments for complex logic

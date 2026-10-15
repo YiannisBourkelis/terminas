@@ -153,7 +153,7 @@ The recommended installation location depends on your use case:
    - Repeat offenders: each new ban of the same IP doubles the previous ban time, up to 2 weeks
    - IP blocking at firewall level (nftables)
 
-   setup.sh and the user management scripts run with `umask 022`, and each setup run removes group/other write permission from the configs, scripts and units termiNAS installed earlier. Root loads or runs all of them, and logrotate skips group-writable configs. Clone the repository with a umask of 022 as well, since root runs `setup.sh` from the checkout (`chmod -R go-w <checkout>` fixes an existing one).
+   setup.sh and the user management scripts run with `umask 022`, so the configs, scripts and units they install are never group- or world-writable. Root loads or runs all of them, and logrotate skips group-writable configs. Clone the repository with a umask of 022 as well, since root runs `setup.sh` from the checkout (`chmod -R go-w <checkout>` fixes an existing one).
 
 5. Create backup users (run as root for each user):
    ```bash

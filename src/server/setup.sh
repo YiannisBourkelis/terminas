@@ -1557,32 +1557,6 @@ else
     echo "Size-cache refresh cron job already exists"
 fi
 
-# Remove group/other write from files termiNAS installs that root loads or runs.
-# "cat > file" keeps an existing file's mode, so files created by an earlier run
-# under a permissive umask stay group-writable until repaired here (logrotate
-# skipped /etc/logrotate.d/terminas on such a host). Only termiNAS-owned paths.
-fix_terminas_permissions() {
-    local p
-    for p in \
-        /etc/logrotate.d/terminas /etc/logrotate.d/terminas-samba \
-        /etc/systemd/system/terminas-monitor.service \
-        /etc/fail2ban/jail.d/terminas-* /etc/fail2ban/fail2ban.d/terminas.local \
-        /etc/fail2ban/filter.d/sshd-ddos.conf /etc/fail2ban/filter.d/terminas-* \
-        /etc/fail2ban/action.d/nftables-terminas.conf /etc/fail2ban/action.d/nftables-common.local \
-        /etc/samba/smb.conf /etc/samba/smb.conf.d /etc/samba/smb.conf.d/*.conf \
-        /etc/sysctl.d/99-terminas-inotify.conf /etc/terminas-retention.conf; do
-        if [ -e "$p" ]; then
-            chmod go-w "$p"
-        fi
-    done
-    if [ -d /var/terminas ]; then
-        chmod -R go-w /var/terminas
-    fi
-    return 0
-}
-echo "Checking permissions of installed files..."
-fix_terminas_permissions
-
 echo ""
 echo "=========================================="
 echo "Setup complete!"
